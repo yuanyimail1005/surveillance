@@ -12,6 +12,7 @@ import shutil
 import threading
 import queue
 import struct
+import re
 import werkzeug.serving
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -90,6 +91,64 @@ else:
     print(f"⚠ Microphone not found, using default: {MICROPHONE_DEVICE}")
 
 print()
+
+SPEAKER_VOLUME_CONTROLS = ('Speaker', 'PCM', 'Master', 'Headphone')
+
+
+def _get_speaker_card_number():
+    """Resolve ALSA card number from detected speaker settings."""
+    if speaker_card:
+        return str(speaker_card)
+
+    if SPEAKER_DEVICE.startswith('hw:'):
+        # SPEAKER_DEVICE is like hw:<card>,<device>
+        device_part = SPEAKER_DEVICE[3:]
+        card_part = device_part.split(',')[0].strip()
+        if card_part:
+            return card_part
+
+    return None
+
+
+def _get_speaker_volume_percent():
+    """Read current speaker volume percent using amixer."""
+    card = _get_speaker_card_number()
+    if card is None:
+        return None, None
+
+    for control in SPEAKER_VOLUME_CONTROLS:
+        result = subprocess.run(
+            ['amixer', '-c', card, 'sget', control],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            continue
+
+        match = re.search(r'\[(\d{1,3})%\]', result.stdout)
+        if match:
+            return int(match.group(1)), control
+
+    return None, None
+
+
+def _set_speaker_volume_percent(volume_percent):
+    """Set speaker volume percent using amixer, trying common controls."""
+    card = _get_speaker_card_number()
+    if card is None:
+        return None
+
+    volume_percent = max(0, min(100, int(volume_percent)))
+    for control in SPEAKER_VOLUME_CONTROLS:
+        result = subprocess.run(
+            ['amixer', '-c', card, 'sset', control, f'{volume_percent}%'],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            return control
+
+    return None
 
 # Audio playback queue
 PLAYBACK_CHUNK_MS = 200
@@ -361,12 +420,70 @@ def play_audio():
         print(f"❌ Play audio endpoint error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
+@app.route('/speaker_volume', methods=['GET'])
+def get_speaker_volume():
+    """Get current Raspberry Pi speaker volume."""
+    try:
+        volume_percent, control = _get_speaker_volume_percent()
+        if volume_percent is None:
+            return jsonify({
+                'status': 'error',
+                'available': False,
+                'message': 'Could not read speaker volume via amixer'
+            }), 500
+
+        return jsonify({
+            'status': 'ok',
+            'available': True,
+            'volume': volume_percent,
+            'control': control
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e), 'available': False}), 500
+
+
+@app.route('/speaker_volume', methods=['POST'])
+def set_speaker_volume():
+    """Set Raspberry Pi speaker volume."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        if 'volume' not in payload:
+            return jsonify({'status': 'error', 'message': 'Missing volume'}), 400
+
+        requested_volume = int(payload['volume'])
+        requested_volume = max(0, min(100, requested_volume))
+
+        used_control = _set_speaker_volume_percent(requested_volume)
+        if used_control is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Could not set speaker volume via amixer'
+            }), 500
+
+        current_volume, _ = _get_speaker_volume_percent()
+        if current_volume is None:
+            current_volume = requested_volume
+
+        return jsonify({
+            'status': 'ok',
+            'volume': current_volume,
+            'control': used_control
+        })
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Volume must be an integer'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/status')
 def status():
+    speaker_volume, speaker_control = _get_speaker_volume_percent()
     return jsonify({
         'camera': camera_proc is not None and camera_proc.poll() is None,
         'audio': audio_proc is not None and audio_proc.poll() is None,
-        'queue_size': audio_queue.qsize()
+        'queue_size': audio_queue.qsize(),
+        'speaker_volume': speaker_volume,
+        'speaker_control': speaker_control
     })
 
 if __name__ == '__main__':

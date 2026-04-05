@@ -255,6 +255,30 @@
             margin-top: 5px;
             text-align: center;
         }
+
+        .speaker-volume-control {
+            margin-top: 12px;
+            padding: 10px;
+            border: 1px solid #dfe4ee;
+            border-radius: 8px;
+            background: #ffffff;
+        }
+
+        .speaker-volume-label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9em;
+            color: #2f3640;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .speaker-slider {
+            width: 100%;
+            accent-color: #667eea;
+            cursor: pointer;
+        }
         
         @media (max-width: 992px) {
             body {
@@ -366,6 +390,22 @@
                             🎤 Start Talking
                         </button>
                     </div>
+                    <div class="speaker-volume-control">
+                        <div class="speaker-volume-label">
+                            <span>🔉 Pi Speaker Volume</span>
+                            <span id="speaker-volume-value">--%</span>
+                        </div>
+                        <input
+                            id="speaker-volume-slider"
+                            class="speaker-slider"
+                            type="range"
+                            min="0"
+                            max="100"
+                            value="70"
+                            step="1"
+                        >
+                        <p class="volume-text" id="speaker-volume-status">Loading speaker volume...</p>
+                    </div>
                     <div id="talk-status" class="status inactive">
                         Microphone Input: Off
                     </div>
@@ -409,6 +449,7 @@
         let nextListenPlayTime = 0;
         let listenMeterSmooth = 0;
         let talkMeterSmooth = 0;
+        let speakerVolumeDebounceTimer = null;
 
         // Debug logging
         function debug(msg) {
@@ -492,6 +533,76 @@
                 talkMeterSmooth = 0;
             }
             updateVolumeMeter(barId, textId, 0, meterType);
+        }
+
+        function updateSpeakerVolumeUI(volume, statusText) {
+            const slider = document.getElementById('speaker-volume-slider');
+            const value = document.getElementById('speaker-volume-value');
+            const status = document.getElementById('speaker-volume-status');
+            if (!slider || !value || !status) return;
+
+            const clamped = Math.max(0, Math.min(100, Number(volume) || 0));
+            slider.value = clamped;
+            value.textContent = `${clamped}%`;
+            if (statusText) {
+                status.textContent = statusText;
+            }
+        }
+
+        async function fetchSpeakerVolume() {
+            const status = document.getElementById('speaker-volume-status');
+            try {
+                const response = await fetch('/speaker_volume');
+                const data = await response.json();
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+
+                updateSpeakerVolumeUI(data.volume, `Using ${data.control} control`);
+            } catch (error) {
+                if (status) {
+                    status.textContent = `Speaker volume unavailable: ${error.message}`;
+                }
+            }
+        }
+
+        async function sendSpeakerVolume(volume) {
+            const status = document.getElementById('speaker-volume-status');
+            try {
+                const response = await fetch('/speaker_volume', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume })
+                });
+                const data = await response.json();
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+
+                updateSpeakerVolumeUI(data.volume, `Speaker volume set (${data.control})`);
+            } catch (error) {
+                if (status) {
+                    status.textContent = `Failed to set speaker volume: ${error.message}`;
+                }
+            }
+        }
+
+        function initializeSpeakerVolumeControl() {
+            const slider = document.getElementById('speaker-volume-slider');
+            if (!slider) return;
+
+            slider.addEventListener('input', (event) => {
+                const vol = Number(event.target.value);
+                updateSpeakerVolumeUI(vol, 'Adjusting...');
+                if (speakerVolumeDebounceTimer) {
+                    clearTimeout(speakerVolumeDebounceTimer);
+                }
+                speakerVolumeDebounceTimer = setTimeout(() => {
+                    sendSpeakerVolume(vol);
+                }, 180);
+            });
+
+            fetchSpeakerVolume();
         }
 
         // Toggle listening to remote microphone
@@ -797,6 +908,8 @@
             stopListening();
             stopTalking();
         });
+
+        initializeSpeakerVolumeControl();
 
         console.log('Page loaded - surveillance system ready');
     </script>
