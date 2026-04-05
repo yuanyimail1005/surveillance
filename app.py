@@ -1,0 +1,389 @@
+import os
+os.environ['ALSA_CARD'] = 'default'
+
+from flask import Flask, render_template, Response, request, jsonify
+from flask_cors import CORS
+import subprocess
+import time
+import logging
+import ssl
+import glob
+import shutil
+import threading
+import queue
+import struct
+import werkzeug.serving
+
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+# ssl.SSLError (UNEXPECTED_EOF_WHILE_READING) is raised in run_wsgi's finally
+# block when the browser closes an HTTPS streaming connection.  Add it to the
+# module-level tuple so werkzeug treats it as a silent client disconnect rather
+# than logging a full traceback.
+werkzeug.serving.connection_dropped_errors = (
+    werkzeug.serving.connection_dropped_errors + (ssl.SSLError,)
+)
+
+app = Flask(__name__)
+CORS(app)
+
+print("\n" + "="*60)
+print("Raspberry Pi Surveillance System - Starting")
+print("="*60 + "\n")
+
+# Audio device configuration
+#MICROPHONE_DEVICE = 'plughw:2,0'  # USB Microphone (card 3)
+#SPEAKER_DEVICE = 'hw:3,0'         # USB Speaker (card 2)
+SAMPLE_RATE = 48000               # Matches successful test
+MIC_CHANNELS = 1
+SPEAKER_CHANNELS = 2
+
+def find_usb_device(device_type, search_name=None):
+    """Find USB device card number"""
+    try:
+        if device_type == "playback":
+            cmd = ["aplay", "-l"]
+        else:
+            cmd = ["arecord", "-l"]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        for line in result.stdout.split('\n'):
+            if 'card' in line and ':' in line:
+                # Extract card number
+                parts = line.split('card ')
+                if len(parts) > 1:
+                    card_num = parts[1].split(':')[0].strip()
+                    
+                    # Match by search name if provided
+                    if search_name:
+                        if search_name.lower() in line.lower():
+                            return card_num
+                    else:
+                        # Return first USB device
+                        if 'USB' in line or 'usb' in line.lower():
+                            return card_num
+        
+        return None
+    except Exception as e:
+        print(f"Error finding {device_type} device: {e}")
+        return None
+
+# Auto-detect devices at startup
+print("\n=== Detecting Audio Devices ===\n")
+
+speaker_card = find_usb_device("playback", "0x1908")
+microphone_card = find_usb_device("capture", "PnP")
+
+if speaker_card:
+    SPEAKER_DEVICE = f'hw:{speaker_card},0'
+    print(f"✓ Speaker found: card {speaker_card}")
+else:
+    SPEAKER_DEVICE = 'hw:3,0'
+    print(f"⚠ Speaker not found, using default: {SPEAKER_DEVICE}")
+
+if microphone_card:
+    MICROPHONE_DEVICE = f'plughw:{microphone_card},0'
+    print(f"✓ Microphone found: card {microphone_card}")
+else:
+    MICROPHONE_DEVICE = 'plughw:2,0'
+    print(f"⚠ Microphone not found, using default: {MICROPHONE_DEVICE}")
+
+print()
+
+# Audio playback queue
+PLAYBACK_CHUNK_MS = 200
+MAX_AUDIO_QUEUE_CHUNKS = 12
+audio_queue = queue.Queue(maxsize=MAX_AUDIO_QUEUE_CHUNKS)
+audio_player_active = True
+
+def audio_player_thread():
+    """Dedicated thread for playing audio sequentially"""
+    global audio_player_active
+    
+    print("🎵 Audio player thread started\n")
+    play_count = 0
+    bytes_per_second = SAMPLE_RATE * SPEAKER_CHANNELS * 2  # S16_LE stereo
+    buffer_size = max(1, (bytes_per_second * PLAYBACK_CHUNK_MS) // 1000)
+    audio_buffer = b''
+    
+    while audio_player_active:
+        try:
+            # Try to get audio data with short timeout
+            try:
+                audio_data = audio_queue.get(timeout=0.03)
+                if audio_data is None:
+                    break
+                audio_buffer += audio_data
+                # Drain any immediately available queued audio to avoid lag.
+                while True:
+                    audio_data = audio_queue.get_nowait()
+                    if audio_data is None:
+                        audio_player_active = False
+                        break
+                    audio_buffer += audio_data
+            except queue.Empty:
+                pass
+            
+            # Play all complete buffered chunks.
+            while len(audio_buffer) >= buffer_size:
+                play_count += 1
+                chunk_to_play = audio_buffer[:buffer_size]
+                audio_buffer = audio_buffer[buffer_size:]
+                
+                print(f"🔊 Audio player #{play_count}: Playing {len(chunk_to_play)} bytes...")
+                
+                try:
+                    # Play directly from memory via stdin.
+                    proc = subprocess.Popen(
+                        [
+                            'aplay',
+                            '-D', SPEAKER_DEVICE,
+                            '-f', 'S16_LE',
+                            '-r', str(SAMPLE_RATE),
+                            '-c', str(SPEAKER_CHANNELS),
+                            '-'
+                        ],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    
+                    print(f"   ✓ aplay started (PID: {proc.pid})")
+                    
+                    # Wait for playback to complete
+                    stdout_data, stderr_data = proc.communicate(input=chunk_to_play, timeout=5)
+                    returncode = proc.returncode
+                    
+                    if returncode == 0:
+                        print(f"   ✓ Playback complete\n")
+                    else:
+                        stderr_msg = stderr_data.decode('utf-8', errors='ignore')
+                        print(f"   ✗ Error (code {returncode}): {stderr_msg}\n")
+                        
+                except subprocess.TimeoutExpired:
+                    print(f"   ⚠ Timeout - killing process\n")
+                    proc.kill()
+                    proc.wait()
+                except Exception as e:
+                    print(f"   ✗ Playback error: {e}\n")
+        
+        except Exception as e:
+            print(f"❌ Audio player thread error: {e}\n")
+    
+    print("🎵 Audio player thread stopped\n")
+
+# Start audio player thread
+player_thread = threading.Thread(target=audio_player_thread, daemon=True)
+player_thread.start()
+
+def start_camera():
+    """Start rpicam-vid outputting MJPEG directly to stdout"""
+    try:
+        print("Starting camera pipeline (rpicam-vid mjpeg)...")
+        proc = subprocess.Popen(
+            [
+                'rpicam-vid', '-o', '-', '-t', '0',
+                '--width', '1920', '--height', '1080',
+                '--framerate', '25', '--codec', 'mjpeg'
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=10**6
+        )
+        print(f"✓ Camera pipeline started (PID: {proc.pid})\n")
+        return proc
+    except Exception as e:
+        print(f"✗ Camera failed: {e}\n")
+        return None
+
+def start_audio():
+    """Start audio recording from USB microphone"""
+    try:
+        print(f"Starting audio recording from USB microphone ({MICROPHONE_DEVICE})...")
+        proc = subprocess.Popen(
+            [
+                'arecord',
+                '-D', MICROPHONE_DEVICE,
+                '-f', 'S16_LE',
+                '-r', str(SAMPLE_RATE),
+                '-c', str(MIC_CHANNELS),
+                '-'
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=4096
+        )
+        
+        time.sleep(0.)
+        if proc.poll() is not None:
+            stderr = proc.stderr.read().decode('utf-8', errors='ignore')
+            print(f"⚠ Audio process died: {stderr}\n")
+            return None
+        
+        print(f"✓ Audio recording started (Mono, {SAMPLE_RATE}Hz)\n")
+        return proc
+    except Exception as e:
+        print(f"⚠ Audio failed: {e}\n")
+        return None
+
+# Start processes
+camera_proc = start_camera()
+audio_proc = start_audio()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/video_feed')
+def video_feed():
+    """Stream video frames by reading MJPEG from camera process stdout"""
+    global camera_proc
+    if not camera_proc or camera_proc.poll() is not None:
+        print("📹 Camera: process not available")
+        return Response("Camera not available", status=500)
+
+    def generate():
+        buffer = b''
+        boundary = b'--frame\r\n'
+        try:
+            while True:
+                chunk = camera_proc.stdout.read(4096)
+                if not chunk:
+                    time.sleep(0.01)
+                    continue
+                buffer += chunk
+
+                # Extract complete JPEGs from the stream using SOI/EOI markers
+                while True:
+                    start = buffer.find(b'\xff\xd8')
+                    end = buffer.find(b'\xff\xd9', start + 2)
+                    if start != -1 and end != -1:
+                        jpg = buffer[start:end + 2]
+                        buffer = buffer[end + 2:]
+                        yield (boundary +
+                               b'Content-Type: image/jpeg\r\n\r\n' +
+                               jpg + b'\r\n')
+                    else:
+                        break
+        except GeneratorExit:
+            return
+        except Exception as e:
+            print(f"📹 Video stream error: {e}")
+            time.sleep(0.1)
+
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/audio_feed')
+def audio_feed():
+    """Stream audio from microphone"""
+    if not audio_proc:
+        print("🎤 Audio: No audio process available")
+        return Response("Audio not available", status=500)
+    
+    def generate():
+        try:
+            chunk_count = 0
+            while True:
+                chunk = audio_proc.stdout.read(4096)
+                if not chunk:
+                    print("🎤 Audio: End of stream")
+                    break
+                
+                chunk_count += 1
+                if chunk_count % 50 == 0:
+                    print(f"🎤 Audio: Sent chunk {chunk_count} ({len(chunk)} bytes)")
+                
+                yield chunk
+        except Exception as e:
+            print(f"🎤 Audio stream error: {e}")
+    
+    return Response(generate(), mimetype=f'audio/L16; rate={SAMPLE_RATE}')
+
+def convert_mono_to_stereo(mono_data):
+    """Convert mono audio to stereo by duplicating samples"""
+    
+    # Convert bytes to mono samples
+    mono_samples = struct.unpack(f'<{len(mono_data)//2}h', mono_data)
+    
+    # Create stereo by interleaving left and right (both same)
+    stereo_bytes = b''
+    for sample in mono_samples:
+        # Write left channel (mono sample)
+        stereo_bytes += struct.pack('<h', sample)
+        # Write right channel (duplicate)
+        stereo_bytes += struct.pack('<h', sample)
+    
+    return stereo_bytes
+
+@app.route('/play_audio', methods=['POST'])
+def play_audio():
+    """Queue audio for playback on speaker"""
+    try:
+        mono_data = request.data
+        if not mono_data:
+            return jsonify({'status': 'ok'})
+        
+        print(f"📥 Received audio: {len(mono_data)} bytes")
+        
+        # Convert mono to stereo
+        stereo_data = convert_mono_to_stereo(mono_data)
+        
+        print(f"🔄 Converted: {len(mono_data)} → {len(stereo_data)} bytes")
+        
+        # Queue for playback. If queue is full, drop oldest chunks so we keep
+        # near real-time audio instead of replaying stale buffered audio.
+        queue_size = audio_queue.qsize()
+        dropped = 0
+        while audio_queue.full():
+            try:
+                audio_queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+
+        try:
+            audio_queue.put_nowait(stereo_data)
+        except queue.Full:
+            # Rare race: queue filled between full() check and put_nowait().
+            try:
+                audio_queue.get_nowait()
+                dropped += 1
+                audio_queue.put_nowait(stereo_data)
+            except queue.Empty:
+                pass
+        
+        new_size = audio_queue.qsize()
+        print(f"📤 Queued for playback (queue size: {queue_size} → {new_size}, dropped: {dropped})\n")
+        
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        print(f"❌ Play audio endpoint error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/status')
+def status():
+    return jsonify({
+        'camera': camera_proc is not None and camera_proc.poll() is None,
+        'audio': audio_proc is not None and audio_proc.poll() is None,
+        'queue_size': audio_queue.qsize()
+    })
+
+if __name__ == '__main__':
+    print("Server: https://0.0.0.0:5000\n")
+    try:
+        app.run(
+            host='0.0.0.0',
+            port=5000,
+            debug=False,
+            threaded=True,
+            ssl_context=('cert.pem', 'key.pem')
+        )
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        audio_player_active = False
+        audio_queue.put(None)
+        if camera_proc:
+            camera_proc.terminate()
+        if audio_proc:
+            audio_proc.terminate()

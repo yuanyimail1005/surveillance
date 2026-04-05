@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raspberry Pi Surveillance</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            max-width: 1000px;
+            width: 100%;
+            padding: 30px;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+            font-size: 2em;
+        }
+        
+        .content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            align-items: start;
+        }
+        
+        .video-section {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        #video-feed {
+            width: 100%;
+            border-radius: 10px;
+            border: 3px solid #667eea;
+            background: #000;
+            display: block;
+        }
+        
+        .controls-section {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .control-group {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .control-group h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.1em;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            flex: 1;
+            min-width: 120px;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .btn-danger:hover:not(:disabled) {
+            background: #c0392b;
+        }
+        
+        .btn-danger:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        
+        .status.active {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.inactive {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .recording-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #e74c3c;
+            animation: pulse 1s infinite;
+            margin-right: 8px;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .info-box {
+            background: white;
+            padding: 12px;
+            border-radius: 5px;
+            border-left: 3px solid #667eea;
+            font-size: 0.95em;
+            line-height: 1.6;
+        }
+        
+        .info-box p {
+            margin: 5px 0;
+        }
+        
+        .debug-box {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 10px;
+            margin-top: 10px;
+            font-size: 0.85em;
+            font-family: monospace;
+            max-height: 100px;
+            overflow-y: auto;
+            color: #666;
+        }
+        
+        .volume-meter {
+            margin-top: 10px;
+        }
+        
+        .volume-meter p {
+            font-size: 0.9em;
+            margin-bottom: 5px;
+            color: #333;
+        }
+        
+        .volume-bar-container {
+            width: 100%;
+            height: 20px;
+            background: linear-gradient(90deg, #f3f4f6 0%, #eceff4 100%);
+            border-radius: 5px;
+            overflow: hidden;
+            border: 1px solid #ddd;
+            position: relative;
+        }
+
+        .volume-bar-container::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image: repeating-linear-gradient(
+                90deg,
+                rgba(255, 255, 255, 0.24) 0px,
+                rgba(255, 255, 255, 0.24) 2px,
+                transparent 2px,
+                transparent 14px
+            );
+            pointer-events: none;
+        }
+        
+        .volume-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #2ecc71 0%, #f1c40f 68%, #e74c3c 100%);
+            transition: width 0.12s ease-out, filter 0.12s ease-out;
+            width: 0%;
+            will-change: width;
+        }
+
+        .volume-bar.level-silent {
+            filter: saturate(0.75) brightness(0.95);
+        }
+
+        .volume-bar.level-low {
+            filter: saturate(0.9) brightness(0.98);
+        }
+
+        .volume-bar.level-good {
+            filter: saturate(1.05) brightness(1.03);
+        }
+
+        .volume-bar.level-high {
+            filter: saturate(1.2) brightness(1.06);
+        }
+        
+        .volume-text {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 5px;
+            text-align: center;
+        }
+        
+        @media (max-width: 768px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+            
+            h1 {
+                font-size: 1.5em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎥 Raspberry Pi Surveillance System</h1>
+        
+        <div class="content">
+            <div class="video-section">
+                <img id="video-feed" src="/video_feed" alt="Live Video Feed">
+            </div>
+            
+            <div class="controls-section">
+                <div class="control-group">
+                    <h3>🎤 Listen to Microphone</h3>
+                    <div class="button-group">
+                        <button class="btn-primary" id="listen-btn" onclick="toggleListen()">
+                            ▶ Start Listening
+                        </button>
+                    </div>
+                    <div id="listen-status" class="status inactive">
+                        Speaker: Off
+                    </div>
+                    <div class="volume-meter">
+                        <p>🔊 Received Volume:</p>
+                        <div class="volume-bar-container">
+                            <div class="volume-bar" id="listen-volume-bar"></div>
+                        </div>
+                        <p class="volume-text" id="listen-volume-text">0%</p>
+                    </div>
+                </div>
+                
+                <div class="control-group">
+                    <h3>🎙️ Talk to Speaker</h3>
+                    <div class="button-group">
+                        <button class="btn-primary" id="talk-btn" onclick="toggleTalk()">
+                            🎤 Start Talking
+                        </button>
+                    </div>
+                    <div id="talk-status" class="status inactive">
+                        Microphone Input: Off
+                    </div>
+                    <div class="volume-meter">
+                        <p>📊 Volume Level:</p>
+                        <div class="volume-bar-container">
+                            <div class="volume-bar" id="volume-bar"></div>
+                        </div>
+                        <p class="volume-text" id="volume-text">0%</p>
+                    </div>
+                    <div class="debug-box" id="debug-box"></div>
+                </div>
+                
+                <div class="control-group">
+                    <h3>ℹ️ System Info</h3>
+                    <div class="info-box">
+                        <p><strong>Video:</strong> 1920x1080 @ 25fps</p>
+                        <p><strong>Audio:</strong> 48000Hz Mono</p>
+                        <p id="system-status"><strong>Status:</strong> Running ✓</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isListening = false;
+        let isTalking = false;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let micStream = null;
+        let audioProcessor = null;
+        let micSourceNode = null;
+        let voiceHighPass = null;
+        let voiceLowPass = null;
+        let silentMonitorGain = null;
+        let listenGainNode = null;
+        let talkSessionId = 0;
+        const activeSendControllers = new Set();
+        let listenAbortController = null;
+        let nextListenPlayTime = 0;
+        let listenMeterSmooth = 0;
+        let talkMeterSmooth = 0;
+
+        // Debug logging
+        function debug(msg) {
+            const box = document.getElementById('debug-box');
+            const timestamp = new Date().toLocaleTimeString();
+            box.innerHTML = `[${timestamp}] ${msg}<br>` + box.innerHTML;
+            if (box.children.length > 5) {
+                box.removeChild(box.lastChild);
+            }
+            console.log(msg);
+        }
+
+        // Initialize Web Audio API
+        async function initAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                listenGainNode = audioContext.createGain();
+                listenGainNode.gain.value = 5;
+                listenGainNode.connect(audioContext.destination);
+                debug('Audio context initialized');
+            }
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+                debug('Audio context resumed');
+            }
+        }
+
+        // Convert Float32 to Int16
+        function float32ToInt16(float32Array) {
+            const int16Array = new Int16Array(float32Array.length);
+            for (let i = 0; i < float32Array.length; i++) {
+                const sample = Math.max(-1, Math.min(1, float32Array[i]));
+                int16Array[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+            }
+            return int16Array;
+        }
+
+        function rmsToPercent(rms) {
+            const db = rms > 0 ? 20 * Math.log10(rms) : -100;
+            return Math.min(100, Math.max(0, Math.round(((db + 70) / 60) * 100)));
+        }
+
+        function volumeLabel(percent) {
+            if (percent < 5) return 'Silent';
+            if (percent < 25) return 'Low';
+            if (percent < 75) return 'Good';
+            return 'High';
+        }
+
+        function volumeLevelClass(percent) {
+            if (percent < 5) return 'level-silent';
+            if (percent < 25) return 'level-low';
+            if (percent < 75) return 'level-good';
+            return 'level-high';
+        }
+
+        function updateVolumeMeter(barId, textId, rawPercent, meterType) {
+            const bar = document.getElementById(barId);
+            const text = document.getElementById(textId);
+            if (!bar || !text) return;
+
+            const clamped = Math.min(100, Math.max(0, rawPercent));
+            const prev = meterType === 'listen' ? listenMeterSmooth : talkMeterSmooth;
+            const smooth = Math.round(prev * 0.72 + clamped * 0.28);
+            if (meterType === 'listen') {
+                listenMeterSmooth = smooth;
+            } else {
+                talkMeterSmooth = smooth;
+            }
+
+            bar.style.width = smooth + '%';
+            bar.classList.remove('level-silent', 'level-low', 'level-good', 'level-high');
+            bar.classList.add(volumeLevelClass(smooth));
+            text.textContent = `${smooth}% · ${volumeLabel(smooth)}`;
+        }
+
+        function resetVolumeMeter(barId, textId, meterType) {
+            if (meterType === 'listen') {
+                listenMeterSmooth = 0;
+            } else {
+                talkMeterSmooth = 0;
+            }
+            updateVolumeMeter(barId, textId, 0, meterType);
+        }
+
+        // Toggle listening to remote microphone
+        async function toggleListen() {
+            if (isListening) {
+                stopListening();
+            } else {
+                startListening();
+            }
+        }
+
+        async function startListening() {
+            try {
+                await initAudioContext();
+                isListening = true;
+                nextListenPlayTime = audioContext.currentTime;
+                listenAbortController = new AbortController();
+                updateUIStatus('listen', true);
+                debug('Starting remote audio stream...');
+                
+                const response = await fetch('/audio_feed', { signal: listenAbortController.signal });
+                if (!response.ok || !response.body) {
+                    throw new Error(`Audio stream unavailable (${response.status})`);
+                }
+
+                const reader = response.body.getReader();
+                
+                while (isListening) {
+                    try {
+                        const { done, value } = await reader.read();
+                        if (done) {
+                            debug('Remote stream ended');
+                            break;
+                        }
+                        
+                        // Convert bytes to Int16Array and play
+                        const sampleCount = Math.floor(value.length / 2);
+                        if (sampleCount === 0) {
+                            continue;
+                        }
+                        const int16Array = new Int16Array(value.buffer, value.byteOffset, sampleCount);
+                        playAudioChunk(int16Array);
+                        
+                    } catch (e) {
+                        if (e.name === 'AbortError') {
+                            break;
+                        }
+                        debug(`Read error: ${e.message}`);
+                        break;
+                    }
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    debug(`Listen error: ${error.message}`);
+                }
+                isListening = false;
+                updateUIStatus('listen', false);
+            } finally {
+                listenAbortController = null;
+            }
+        }
+
+        function stopListening() {
+            isListening = false;
+            if (listenAbortController) {
+                listenAbortController.abort();
+                listenAbortController = null;
+            }
+            resetVolumeMeter('listen-volume-bar', 'listen-volume-text', 'listen');
+            updateUIStatus('listen', false);
+            debug('Stopped listening');
+        }
+
+        // Play audio chunk from remote microphone
+        function playAudioChunk(int16Array) {
+            try {
+                const audioBuffer = audioContext.createBuffer(
+                    1,
+                    int16Array.length,
+                    48000
+                );
+                
+                const channelData = audioBuffer.getChannelData(0);
+                
+                let sumSq = 0;
+                for (let i = 0; i < int16Array.length; i++) {
+                    let s = int16Array[i] / 32768.0;
+                    if (s > 0.98) s = 0.98;
+                    if (s < -0.98) s = -0.98;
+                    channelData[i] = s;
+                    sumSq += s * s;
+                }
+                const rms = Math.sqrt(sumSq / int16Array.length);
+                const volumePercent = rmsToPercent(rms);
+                updateVolumeMeter('listen-volume-bar', 'listen-volume-text', volumePercent, 'listen');
+                
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(listenGainNode || audioContext.destination);
+
+                const now = audioContext.currentTime;
+                if (nextListenPlayTime < now + 0.02) {
+                    nextListenPlayTime = now + 0.02;
+                }
+                source.start(nextListenPlayTime);
+                nextListenPlayTime += audioBuffer.duration;
+            } catch (error) {
+                console.error('Playback error:', error);
+            }
+        }
+
+        // Toggle talking to remote speaker
+        async function toggleTalk() {
+            if (isTalking) {
+                stopTalking();
+            } else {
+                startTalking();
+            }
+        }
+
+        async function startTalking() {
+            try {
+                const sessionId = ++talkSessionId;
+                debug('Requesting microphone permission...');
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        channelCount: 1,
+                        sampleRate: 48000,
+                        latency: 0.02
+                    }
+                });
+                micStream = stream;
+                debug('Microphone access granted');
+                
+                // Check microphone volume
+                const audioTracks = stream.getAudioTracks();
+                console.log('Audio tracks:', audioTracks);
+                audioTracks.forEach(track => {
+                    console.log('Track settings:', track.getSettings());
+                });
+                
+                await initAudioContext();
+                
+                micSourceNode = audioContext.createMediaStreamSource(stream);
+                const bufferSize = 8192; // 170ms at 48kHz, good for low latency
+
+                // Keep voice frequencies and reduce low-frequency rumble / hiss.
+                voiceHighPass = audioContext.createBiquadFilter();
+                voiceHighPass.type = 'highpass';
+                voiceHighPass.frequency.value = 120;
+
+                voiceLowPass = audioContext.createBiquadFilter();
+                voiceLowPass.type = 'lowpass';
+                voiceLowPass.frequency.value = 3600;
+                
+                // Create analyser for volume detection
+                const analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                micSourceNode.connect(analyser);
+                
+                // Use ScriptProcessor for audio capture
+                audioProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+                
+                let sendCount = 0;
+                audioProcessor.onaudioprocess = async (event) => {
+                    if (!isTalking || sessionId !== talkSessionId) return;
+                    
+                    const inputData = event.inputBuffer.getChannelData(0);
+                    
+                    // Calculate volume
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                        sum += inputData[i] * inputData[i];
+                    }
+                    const rms = Math.sqrt(sum / inputData.length);
+                    const volumePercent = rmsToPercent(rms);
+
+                    updateVolumeMeter('volume-bar', 'volume-text', volumePercent, 'talk');
+                    
+                    // Log every 10th chunk
+                    sendCount++;
+                    if (sendCount % 10 === 0) {
+                        debug(`Volume: ${volumePercent}% (RMS: ${rms.toFixed(4)})`);
+                    }
+
+                    // Simple noise gate for very low-level background noise.
+                    if (rms < 0.008) {
+                        return;
+                    }
+
+                    const int16Data = float32ToInt16(inputData);
+                    
+                    // Send to server
+                    const controller = new AbortController();
+                    activeSendControllers.add(controller);
+                    try {
+                        await fetch('/play_audio', {
+                            method: 'POST',
+                            body: int16Data.buffer,
+                            signal: controller.signal
+                        });
+                    } catch (e) {
+                        if (e.name !== 'AbortError') {
+                            console.error('Send error:', e);
+                        }
+                    } finally {
+                        activeSendControllers.delete(controller);
+                    }
+                };
+                
+                micSourceNode.connect(voiceHighPass);
+                voiceHighPass.connect(voiceLowPass);
+                voiceLowPass.connect(audioProcessor);
+
+                // ScriptProcessor must stay connected to run in all browsers.
+                silentMonitorGain = audioContext.createGain();
+                silentMonitorGain.gain.value = 0;
+                audioProcessor.connect(silentMonitorGain);
+                silentMonitorGain.connect(audioContext.destination);
+                
+                isTalking = true;
+                updateUIStatus('talk', true);
+                debug('Recording and sending audio at 48000Hz');
+                
+            } catch (error) {
+                debug(`Microphone error: ${error.message}`);
+                alert('Could not access your microphone. Please check permissions.');
+            }
+        }
+
+        function stopTalking() {
+            isTalking = false;
+            talkSessionId++;
+
+            for (const controller of activeSendControllers) {
+                controller.abort();
+            }
+            activeSendControllers.clear();
+
+            if (audioProcessor) {
+                audioProcessor.onaudioprocess = null;
+                audioProcessor.disconnect();
+                audioProcessor = null;
+            }
+            if (voiceLowPass) {
+                voiceLowPass.disconnect();
+                voiceLowPass = null;
+            }
+            if (voiceHighPass) {
+                voiceHighPass.disconnect();
+                voiceHighPass = null;
+            }
+            if (silentMonitorGain) {
+                silentMonitorGain.disconnect();
+                silentMonitorGain = null;
+            }
+            if (micSourceNode) {
+                micSourceNode.disconnect();
+                micSourceNode = null;
+            }
+            if (micStream) {
+                micStream.getTracks().forEach(track => track.stop());
+                micStream = null;
+            }
+
+            resetVolumeMeter('volume-bar', 'volume-text', 'talk');
+            updateUIStatus('talk', false);
+            debug('Recording stopped');
+        }
+
+        // Update UI status
+        function updateUIStatus(type, isActive) {
+            if (type === 'listen') {
+                const btn = document.getElementById('listen-btn');
+                const status = document.getElementById('listen-status');
+                
+                btn.className = isActive ? 'btn-danger' : 'btn-primary';
+                btn.textContent = isActive ? '⏹ Stop Listening' : '▶ Start Listening';
+                
+                status.className = isActive ? 'status active' : 'status inactive';
+                status.innerHTML = isActive ? 
+                    '<span class="recording-indicator"></span>Speaker: On' : 
+                    'Speaker: Off';
+            } else if (type === 'talk') {
+                const btn = document.getElementById('talk-btn');
+                const status = document.getElementById('talk-status');
+                
+                btn.className = isActive ? 'btn-danger' : 'btn-primary';
+                btn.textContent = isActive ? '⏹ Stop Talking' : '🎤 Start Talking';
+                
+                status.className = isActive ? 'status active' : 'status inactive';
+                status.innerHTML = isActive ? 
+                    '<span class="recording-indicator"></span>Microphone Input: On' : 
+                    'Microphone Input: Off';
+            }
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            stopListening();
+            stopTalking();
+        });
+
+        console.log('Page loaded - surveillance system ready');
+    </script>
+</body>
+</html>
