@@ -151,7 +151,7 @@ def _set_speaker_volume_percent(volume_percent):
     return None
 
 # Audio playback queue
-PLAYBACK_CHUNK_MS = 200
+PLAYBACK_CHUNK_MS = 2000
 MAX_AUDIO_QUEUE_CHUNKS = 12
 audio_queue = queue.Queue(maxsize=MAX_AUDIO_QUEUE_CHUNKS)
 audio_player_active = True
