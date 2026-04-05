@@ -14,33 +14,36 @@
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
+            min-height: 100dvh;
             display: flex;
             justify-content: center;
             align-items: center;
-            padding: 20px;
+            padding: 12px;
+            overflow: hidden;
         }
         
         .container {
             background: white;
             border-radius: 15px;
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-            max-width: 1000px;
-            width: 100%;
-            padding: 30px;
+            width: min(96vw, calc(96dvh * 16 / 9));
+            height: min(96dvh, calc(96vw * 9 / 16));
+            aspect-ratio: 16 / 9;
+            padding: 20px;
+            overflow: auto;
         }
         
         h1 {
             text-align: center;
             color: #333;
-            margin-bottom: 30px;
-            font-size: 2em;
+            margin-bottom: 16px;
+            font-size: clamp(1.3rem, 2vw, 1.9rem);
         }
         
         .content {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 30px;
+            grid-template-columns: 1.35fr 1fr;
+            gap: 16px;
             align-items: start;
         }
         
@@ -52,6 +55,8 @@
         
         #video-feed {
             width: 100%;
+            aspect-ratio: 16 / 9;
+            object-fit: cover;
             border-radius: 10px;
             border: 3px solid #667eea;
             background: #000;
@@ -66,7 +71,7 @@
         
         .control-group {
             background: #f8f9fa;
-            padding: 20px;
+            padding: 14px;
             border-radius: 10px;
             border-left: 4px solid #667eea;
         }
@@ -251,6 +256,69 @@
             text-align: center;
         }
         
+        @media (max-width: 992px) {
+            body {
+                overflow: auto;
+                padding: 12px;
+            }
+
+            .container {
+                width: 100%;
+                height: auto;
+                aspect-ratio: auto;
+                overflow: visible;
+            }
+
+            .content {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-height: 760px) and (min-width: 993px) {
+            .container {
+                padding: 14px;
+            }
+
+            h1 {
+                margin-bottom: 10px;
+                font-size: 1.2rem;
+            }
+
+            .content {
+                gap: 12px;
+            }
+
+            .controls-section {
+                gap: 10px;
+            }
+
+            .control-group {
+                padding: 10px;
+            }
+
+            .control-group h3 {
+                margin-bottom: 8px;
+                font-size: 1rem;
+            }
+
+            button {
+                padding: 8px 12px;
+            }
+
+            .status {
+                margin-top: 8px;
+                padding: 8px;
+            }
+
+            .volume-meter {
+                margin-top: 8px;
+            }
+
+            .debug-box {
+                max-height: 64px;
+            }
+        }
+
         @media (max-width: 768px) {
             .content {
                 grid-template-columns: 1fr;
