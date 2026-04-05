@@ -750,7 +750,8 @@
                 await initAudioContext();
                 
                 micSourceNode = audioContext.createMediaStreamSource(stream);
-                const bufferSize = 8192; // 170ms at 48kHz, good for low latency
+                //const bufferSize = 8192; // 170ms at 48kHz, good for low latency
+                const bufferSize = 16384;
 
                 // Keep voice frequencies and reduce low-frequency rumble / hiss.
                 voiceHighPass = audioContext.createBiquadFilter();
@@ -825,11 +826,11 @@
                 silentMonitorGain.gain.value = 0;
                 audioProcessor.connect(silentMonitorGain);
                 silentMonitorGain.connect(audioContext.destination);
-                
+
                 isTalking = true;
                 updateUIStatus('talk', true);
                 debug('Recording and sending audio at 48000Hz');
-                
+
             } catch (error) {
                 debug(`Microphone error: ${error.message}`);
                 alert('Could not access your microphone. Please check permissions.');
