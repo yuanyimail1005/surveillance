@@ -33,8 +33,8 @@ print("Raspberry Pi Surveillance System - Starting")
 print("="*60 + "\n")
 
 # Audio device configuration
-#MICROPHONE_DEVICE = 'plughw:2,0'  # USB Microphone (card 3)
-#SPEAKER_DEVICE = 'hw:3,0'         # USB Speaker (card 2)
+MICROPHONE_DEVICE = 'plughw:2,0'  # USB Microphone (card 3)
+SPEAKER_DEVICE = 'plughwhw:3,0'     # USB Speaker (card 2)
 SAMPLE_RATE = 48000               # Matches successful test
 MIC_CHANNELS = 1
 SPEAKER_CHANNELS = 2
@@ -77,17 +77,17 @@ speaker_card = find_usb_device("playback", "0x1908")
 microphone_card = find_usb_device("capture", "PnP")
 
 if speaker_card:
-    SPEAKER_DEVICE = f'hw:{speaker_card},0'
+    SPEAKER_DEVICE = f'plughw:{speaker_card},0'
     print(f"✓ Speaker found: card {speaker_card}")
 else:
-    SPEAKER_DEVICE = 'hw:3,0'
+    SPEAKER_DEVICE = SPEAKER_DEVICE
     print(f"⚠ Speaker not found, using default: {SPEAKER_DEVICE}")
 
 if microphone_card:
     MICROPHONE_DEVICE = f'plughw:{microphone_card},0'
     print(f"✓ Microphone found: card {microphone_card}")
 else:
-    MICROPHONE_DEVICE = 'plughw:2,0'
+    MICROPHONE_DEVICE = MICROPHONE_DEVICE
     print(f"⚠ Microphone not found, using default: {MICROPHONE_DEVICE}")
 
 print()
