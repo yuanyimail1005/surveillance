@@ -460,6 +460,7 @@
                     <div class="info-box">
                         <p><strong>Video:</strong> 1920x1080 @ 25fps</p>
                         <p><strong>Audio:</strong> 48000Hz Mono</p>
+                        <p id="audio-player-nice"><strong>Audio Player Nice:</strong> --</p>
                         <p id="system-status"><strong>Status:</strong> Running ✓</p>
                     </div>
                 </div>
@@ -669,6 +670,40 @@
             });
         }
 
+        async function refreshSystemStatus() {
+            const statusEl = document.getElementById('system-status');
+            const niceEl = document.getElementById('audio-player-nice');
+
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                if (niceEl) {
+                    const niceValue = Number.isFinite(data.audio_player_nice)
+                        ? data.audio_player_nice
+                        : '--';
+                    niceEl.innerHTML = `<strong>Audio Player Nice:</strong> ${niceValue}`;
+                }
+
+                if (statusEl) {
+                    const isHealthy = Boolean(data.camera) && Boolean(data.audio);
+                    statusEl.innerHTML = isHealthy
+                        ? '<strong>Status:</strong> Running ✓'
+                        : '<strong>Status:</strong> Degraded ⚠';
+                }
+            } catch (error) {
+                if (statusEl) {
+                    statusEl.innerHTML = '<strong>Status:</strong> Offline ✗';
+                }
+                if (niceEl) {
+                    niceEl.innerHTML = '<strong>Audio Player Nice:</strong> --';
+                }
+            }
+        }
+
         // Toggle listening to remote microphone
         async function toggleListen() {
             if (isListening) {
@@ -814,8 +849,8 @@
                 await initAudioContext();
                 
                 micSourceNode = audioContext.createMediaStreamSource(stream);
-                const bufferSize = 4096; // 85ms at 48kHz, good for stability across browsers
-                // const bufferSize = 8192; // 170ms at 48kHz, good for low latency
+                // const bufferSize = 4096; // 85ms at 48kHz, good for stability across browsers
+                const bufferSize = 8192; // 170ms at 48kHz, good for low latency
 
                 // Keep voice frequencies and reduce low-frequency rumble / hiss.
                 voiceHighPass = audioContext.createBiquadFilter();
@@ -976,6 +1011,8 @@
 
         initializeSpeakerVolumeControl();
         initializeCameraRotationControl();
+        refreshSystemStatus();
+        setInterval(refreshSystemStatus, 5000);
 
         console.log('Page loaded - surveillance system ready');
     </script>

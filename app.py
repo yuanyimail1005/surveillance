@@ -10,11 +10,9 @@ import ssl
 import glob
 import shutil
 import threading
-import queue
 import struct
 import re
 import werkzeug.serving
-import errno
 import stat
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -36,11 +34,28 @@ print("="*60 + "\n")
 
 # Audio device configuration
 MICROPHONE_DEVICE = 'plughw:2,0'  # USB Microphone (card 3)
-SPEAKER_DEVICE = 'plughwhw:3,0'     # USB Speaker (card 2)
+SPEAKER_DEVICE = 'plughw:3,0'       # USB Speaker (card 2)
 PULSE_SINK_NAME = os.environ.get('PULSE_SINK_NAME', '@DEFAULT_SINK@')
 SAMPLE_RATE = 48000               # Matches successful test
 MIC_CHANNELS = 1
 SPEAKER_CHANNELS = 2
+AUDIO_PLAYER_NICE = int(os.environ.get('AUDIO_PLAYER_NICE', '0'))
+pulseaudio_started_by_app = False
+
+def find_pulse_sink(search_vendor='1908'):
+    """Find PulseAudio sink name matching the USB speaker vendor ID."""
+    try:
+        result = subprocess.run(['pactl', 'list', 'short', 'sinks'],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and search_vendor in parts[1]:
+                return parts[1]
+    except Exception as e:
+        print(f"Error finding PulseAudio sink: {e}")
+    return None
 
 def find_usb_device(device_type, search_name=None):
     """Find USB device card number"""
@@ -73,8 +88,44 @@ def find_usb_device(device_type, search_name=None):
         print(f"Error finding {device_type} device: {e}")
         return None
 
+def ensure_pulseaudio_daemon_running():
+    """Start PulseAudio daemon if it is not already running."""
+    global pulseaudio_started_by_app
+
+    result = subprocess.run(['pactl', 'info'], capture_output=True)
+    if result.returncode == 0:
+        pulseaudio_started_by_app = False
+        print("✓ PulseAudio daemon already running")
+        return True
+    print("⚙ PulseAudio not running, starting daemon...")
+    start = subprocess.run(
+        ['pulseaudio', '--start', '--daemonize=true', '--exit-idle-time=-1'],
+        capture_output=True, text=True
+    )
+    if start.returncode == 0:
+        time.sleep(1)  # give it a moment to fully initialise
+        pulseaudio_started_by_app = True
+        print("✓ PulseAudio daemon started")
+        return True
+    print(f"✗ Failed to start PulseAudio: {start.stderr.strip()}")
+    return False
+
+def stop_pulseaudio_daemon_if_started_by_app():
+    """Stop PulseAudio daemon only if this app started it."""
+    if not pulseaudio_started_by_app:
+        return
+
+    stop = subprocess.run(['pulseaudio', '--kill'], capture_output=True, text=True)
+    if stop.returncode == 0:
+        print("✓ PulseAudio daemon stopped")
+    else:
+        error_text = (stop.stderr or stop.stdout or 'unknown error').strip()
+        print(f"⚠ Failed to stop PulseAudio daemon: {error_text}")
+
 # Auto-detect devices at startup
 print("\n=== Detecting Audio Devices ===\n")
+
+ensure_pulseaudio_daemon_running()
 
 speaker_card = find_usb_device("playback", "0x1908")
 microphone_card = find_usb_device("capture", "PnP")
@@ -83,8 +134,14 @@ if speaker_card:
     SPEAKER_DEVICE = f'plughw:{speaker_card},0'
     print(f"✓ Speaker found: card {speaker_card}")
 else:
-    SPEAKER_DEVICE = SPEAKER_DEVICE
     print(f"⚠ Speaker not found, using default: {SPEAKER_DEVICE}")
+
+pulse_sink = find_pulse_sink()
+if pulse_sink:
+    PULSE_SINK_NAME = pulse_sink
+    print(f"✓ PulseAudio sink found: {PULSE_SINK_NAME}")
+else:
+    print(f"⚠ PulseAudio sink not found, using default: {PULSE_SINK_NAME}")
 
 if microphone_card:
     MICROPHONE_DEVICE = f'plughw:{microphone_card},0'
@@ -96,7 +153,6 @@ else:
 print()
 
 SPEAKER_VOLUME_CONTROLS = ('Speaker', 'PCM', 'Master', 'Headphone')
-
 
 def _get_speaker_card_number():
     """Resolve ALSA card number from detected speaker settings."""
@@ -111,7 +167,6 @@ def _get_speaker_card_number():
             return card_part
 
     return None
-
 
 def _get_speaker_volume_percent():
     """Read current speaker volume percent using amixer."""
@@ -134,7 +189,6 @@ def _get_speaker_volume_percent():
 
     return None, None
 
-
 def _set_speaker_volume_percent(volume_percent):
     """Set speaker volume percent using amixer, trying common controls."""
     card = _get_speaker_card_number()
@@ -153,15 +207,11 @@ def _set_speaker_volume_percent(volume_percent):
 
     return None
 
-# Audio playback queue
-PLAYBACK_CHUNK_MS = 200
-MAX_AUDIO_QUEUE_CHUNKS = 12
-audio_queue = queue.Queue(maxsize=MAX_AUDIO_QUEUE_CHUNKS)
-audio_player_active = True
+# Audio playback pipeline
 PULSE_FIFO_PATH = '/tmp/surveillance_pulse_fifo'
 pulse_proc = None
 pulse_fifo_fd = None
-
+pulse_write_lock = threading.Lock()
 
 def start_pulse_pipeline():
     """Start one PulseAudio playback process and feed it through a named FIFO."""
@@ -213,44 +263,35 @@ def _restart_pulse_pipeline():
     return start_pulse_pipeline()
 
 
-def write_to_pulse_fifo(audio_bytes, minimum_bytes=None):
-    """Write all bytes to PulseAudio FIFO; optionally require a minimum payload size."""
+def write_to_pulse_fifo(audio_bytes):
+    """Write all bytes to PulseAudio FIFO."""
     global pulse_fifo_fd
 
     if not audio_bytes:
         return True
 
-    if minimum_bytes is not None and len(audio_bytes) < minimum_bytes:
-        print(
-            f"⚠ Refusing short write: got {len(audio_bytes)} bytes, "
-            f"need at least {minimum_bytes}"
-        )
-        return False
-
     if pulse_proc is None or pulse_proc.poll() is not None or pulse_fifo_fd is None:
         if not _restart_pulse_pipeline():
             return False
 
-    view = memoryview(audio_bytes)
-    offset = 0
-    while offset < len(view):
-        try:
-            written = os.write(pulse_fifo_fd, view[offset:])
-            if written <= 0:
+    # Flask can handle concurrent requests; serialize FIFO writes to keep audio frames ordered.
+    with pulse_write_lock:
+        view = memoryview(audio_bytes)
+        offset = 0
+        while offset < len(view):
+            try:
+                written = os.write(pulse_fifo_fd, view[offset:])
+                if written <= 0:
+                    return False
+                print(f"   ↳ PulseAudio FIFO write wrote {written} bytes")
+                offset += written
+            except BrokenPipeError:
+                print("⚠ PulseAudio FIFO broke, restarting pipeline")
+                if not _restart_pulse_pipeline():
+                    return False
+            except OSError as e:
+                print(f"⚠ PulseAudio FIFO write error: {e}")
                 return False
-            print(f"   ↳ PulseAudio FIFO write wrote {written} bytes")
-            offset += written
-        except BlockingIOError:
-            continue
-        except BrokenPipeError:
-            print("⚠ PulseAudio FIFO broke, restarting pipeline")
-            if not _restart_pulse_pipeline():
-                return False
-        except OSError as e:
-            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                continue
-            print(f"⚠ PulseAudio FIFO write error: {e}")
-            return False
 
     return True
 
@@ -285,56 +326,10 @@ def stop_pulse_pipeline(remove_fifo=True):
         except OSError:
             pass
 
-def audio_player_thread():
-    """Dedicated thread for playing audio sequentially"""
-    global audio_player_active
-    
-    print("🎵 Audio player thread started\n")
-    play_count = 0
-    bytes_per_second = SAMPLE_RATE * SPEAKER_CHANNELS * 2  # S16_LE stereo
-    buffer_size = max(1, (bytes_per_second * PLAYBACK_CHUNK_MS) // 1000)
-    audio_buffer = b''
-    
-    while audio_player_active:
-        try:
-            # Try to get audio data with short timeout
-            try:
-                audio_data = audio_queue.get(timeout=0.03)
-                if audio_data is None:
-                    break
-                audio_buffer += audio_data
-                # Drain any immediately available queued audio to avoid lag.
-                while True:
-                    audio_data = audio_queue.get_nowait()
-                    if audio_data is None:
-                        audio_player_active = False
-                        break
-                    audio_buffer += audio_data
-            except queue.Empty:
-                pass
-            
-            # Play all complete buffered chunks.
-            while len(audio_buffer) >= buffer_size:
-                play_count += 1
-                chunk_to_play = audio_buffer[:buffer_size]
-                audio_buffer = audio_buffer[buffer_size:]
-                
-                print(f"🔊 Audio player #{play_count}: Playing {len(chunk_to_play)} bytes...")
-
-                if write_to_pulse_fifo(chunk_to_play, minimum_bytes=buffer_size):
-                    print(f"   ✓ Queued to PulseAudio FIFO pipeline ({len(chunk_to_play)} bytes)\n")
-                else:
-                    print(f"   ⚠ Failed to write chunk to PulseAudio pipeline ({len(chunk_to_play)} bytes)\n")
-        
-        except Exception as e:
-            print(f"❌ Audio player thread error: {e}\n")
-    
-    print("🎵 Audio player thread stopped\n")
-
-# Start audio player thread
-start_pulse_pipeline()
-player_thread = threading.Thread(target=audio_player_thread, daemon=True)
-player_thread.start()
+if start_pulse_pipeline():
+    print("🎵 Direct audio write mode enabled (no intermediate queue)")
+else:
+    print("⚠ Audio playback pipeline will retry on first write")
 
 def start_camera():
     """Start rpicam-vid outputting MJPEG directly to stdout"""
@@ -477,7 +472,7 @@ def convert_mono_to_stereo(mono_data):
 
 @app.route('/play_audio', methods=['POST'])
 def play_audio():
-    """Queue audio for playback on speaker"""
+    """Play audio on speaker by writing directly to the PulseAudio FIFO."""
     try:
         mono_data = request.data
         if not mono_data:
@@ -489,31 +484,11 @@ def play_audio():
         stereo_data = convert_mono_to_stereo(mono_data)
         
         print(f"🔄 Converted: {len(mono_data)} → {len(stereo_data)} bytes")
-        
-        # Queue for playback. If queue is full, drop oldest chunks so we keep
-        # near real-time audio instead of replaying stale buffered audio.
-        queue_size = audio_queue.qsize()
-        dropped = 0
-        while audio_queue.full():
-            try:
-                audio_queue.get_nowait()
-                dropped += 1
-            except queue.Empty:
-                break
 
-        try:
-            audio_queue.put_nowait(stereo_data)
-        except queue.Full:
-            # Rare race: queue filled between full() check and put_nowait().
-            try:
-                audio_queue.get_nowait()
-                dropped += 1
-                audio_queue.put_nowait(stereo_data)
-            except queue.Empty:
-                pass
-        
-        new_size = audio_queue.qsize()
-        print(f"📤 Queued for playback (queue size: {queue_size} → {new_size}, dropped: {dropped})\n")
+        if not write_to_pulse_fifo(stereo_data):
+            return jsonify({'status': 'error', 'message': 'Audio write failed'}), 503
+
+        print(f"📤 Wrote to PulseAudio FIFO ({len(stereo_data)} bytes)\n")
         
         return jsonify({'status': 'ok'})
     except Exception as e:
@@ -581,7 +556,8 @@ def status():
     return jsonify({
         'camera': camera_proc is not None and camera_proc.poll() is None,
         'audio': audio_proc is not None and audio_proc.poll() is None,
-        'queue_size': audio_queue.qsize(),
+        'queue_size': 0,
+        'audio_player_nice': AUDIO_PLAYER_NICE,
         'speaker_volume': speaker_volume,
         'speaker_control': speaker_control
     })
@@ -599,9 +575,8 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
-        audio_player_active = False
-        audio_queue.put(None)
         stop_pulse_pipeline()
+        stop_pulseaudio_daemon_if_started_by_app()
         if camera_proc:
             camera_proc.terminate()
         if audio_proc:
