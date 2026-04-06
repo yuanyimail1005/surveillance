@@ -61,12 +61,39 @@
             border: 3px solid #667eea;
             background: #000;
             display: block;
+            transform-origin: center center;
+            transition: transform 0.22s ease;
         }
         
         .controls-section {
             display: flex;
             flex-direction: column;
             gap: 15px;
+        }
+
+        .video-tools {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .video-tools label {
+            display: block;
+            font-size: 0.9em;
+            font-weight: 600;
+            color: #2f3640;
+            margin-bottom: 8px;
+        }
+
+        .rotation-select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #cfd6e6;
+            border-radius: 8px;
+            background: #fff;
+            color: #2f3640;
+            font-size: 0.95em;
         }
         
         .control-group {
@@ -361,6 +388,15 @@
         <div class="content">
             <div class="video-section">
                 <img id="video-feed" src="/video_feed" alt="Live Video Feed">
+                <div class="video-tools">
+                    <label for="camera-rotation">Camera Rotation</label>
+                    <select id="camera-rotation" class="rotation-select">
+                        <option value="0">0° (Default)</option>
+                        <option value="90">90°</option>
+                        <option value="180">180°</option>
+                        <option value="270">270°</option>
+                    </select>
+                </div>
             </div>
             
             <div class="controls-section">
@@ -450,6 +486,7 @@
         let listenMeterSmooth = 0;
         let talkMeterSmooth = 0;
         let speakerVolumeDebounceTimer = null;
+        const ROTATION_STORAGE_KEY = 'cameraRotationDegrees';
 
         // Debug logging
         function debug(msg) {
@@ -603,6 +640,33 @@
             });
 
             fetchSpeakerVolume();
+        }
+
+        function applyCameraRotation(degrees) {
+            const feed = document.getElementById('video-feed');
+            if (!feed) return;
+
+            const normalized = Number(degrees);
+            const valid = [0, 90, 180, 270].includes(normalized) ? normalized : 0;
+            const scale = (valid === 90 || valid === 270) ? 0.5625 : 1;
+            feed.style.transform = `rotate(${valid}deg) scale(${scale})`;
+        }
+
+        function initializeCameraRotationControl() {
+            const rotationSelect = document.getElementById('camera-rotation');
+            if (!rotationSelect) return;
+
+            const saved = localStorage.getItem(ROTATION_STORAGE_KEY);
+            const initialRotation = [90, 180, 270].includes(Number(saved)) ? Number(saved) : 0;
+
+            rotationSelect.value = String(initialRotation);
+            applyCameraRotation(initialRotation);
+
+            rotationSelect.addEventListener('change', (event) => {
+                const selectedRotation = Number(event.target.value);
+                applyCameraRotation(selectedRotation);
+                localStorage.setItem(ROTATION_STORAGE_KEY, String(selectedRotation));
+            });
         }
 
         // Toggle listening to remote microphone
@@ -911,6 +975,7 @@
         });
 
         initializeSpeakerVolumeControl();
+        initializeCameraRotationControl();
 
         console.log('Page loaded - surveillance system ready');
     </script>
