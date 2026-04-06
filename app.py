@@ -14,6 +14,8 @@ import queue
 import struct
 import re
 import werkzeug.serving
+import errno
+import stat
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
@@ -35,6 +37,7 @@ print("="*60 + "\n")
 # Audio device configuration
 MICROPHONE_DEVICE = 'plughw:2,0'  # USB Microphone (card 3)
 SPEAKER_DEVICE = 'plughwhw:3,0'     # USB Speaker (card 2)
+PULSE_SINK_NAME = os.environ.get('PULSE_SINK_NAME', '@DEFAULT_SINK@')
 SAMPLE_RATE = 48000               # Matches successful test
 MIC_CHANNELS = 1
 SPEAKER_CHANNELS = 2
@@ -151,10 +154,136 @@ def _set_speaker_volume_percent(volume_percent):
     return None
 
 # Audio playback queue
-PLAYBACK_CHUNK_MS = 2000
+PLAYBACK_CHUNK_MS = 200
 MAX_AUDIO_QUEUE_CHUNKS = 12
 audio_queue = queue.Queue(maxsize=MAX_AUDIO_QUEUE_CHUNKS)
 audio_player_active = True
+PULSE_FIFO_PATH = '/tmp/surveillance_pulse_fifo'
+pulse_proc = None
+pulse_fifo_fd = None
+
+
+def start_pulse_pipeline():
+    """Start one PulseAudio playback process and feed it through a named FIFO."""
+    global pulse_proc, pulse_fifo_fd
+
+    try:
+        if os.path.exists(PULSE_FIFO_PATH):
+            mode = os.stat(PULSE_FIFO_PATH).st_mode
+            if not stat.S_ISFIFO(mode):
+                try:
+                    os.remove(PULSE_FIFO_PATH)
+                except OSError:
+                    pass
+        if not os.path.exists(PULSE_FIFO_PATH):
+            os.mkfifo(PULSE_FIFO_PATH, 0o600)
+
+        if pulse_proc is None or pulse_proc.poll() is not None:
+            pulse_proc = subprocess.Popen(
+                [
+                    'pacat',
+                    '--playback',
+                    '--raw',
+                    '--format=s16le',
+                    '--rate', str(SAMPLE_RATE),
+                    '--channels', str(SPEAKER_CHANNELS),
+                    '--device', PULSE_SINK_NAME,
+                    '--stream-name', 'surveillance-speaker',
+                    PULSE_FIFO_PATH
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+
+        if pulse_fifo_fd is None:
+            # Blocking open/write ensures each queued chunk is fully delivered.
+            pulse_fifo_fd = os.open(PULSE_FIFO_PATH, os.O_WRONLY)
+
+        print(f"✓ PulseAudio FIFO pipeline started (PID: {pulse_proc.pid}, sink: {PULSE_SINK_NAME})")
+        return True
+    except Exception as e:
+        print(f"✗ Failed to start PulseAudio pipeline: {e}")
+        return False
+
+
+def _restart_pulse_pipeline():
+    """Best-effort restart when PulseAudio playback exits or pipe breaks."""
+    stop_pulse_pipeline(remove_fifo=False)
+    return start_pulse_pipeline()
+
+
+def write_to_pulse_fifo(audio_bytes, minimum_bytes=None):
+    """Write all bytes to PulseAudio FIFO; optionally require a minimum payload size."""
+    global pulse_fifo_fd
+
+    if not audio_bytes:
+        return True
+
+    if minimum_bytes is not None and len(audio_bytes) < minimum_bytes:
+        print(
+            f"⚠ Refusing short write: got {len(audio_bytes)} bytes, "
+            f"need at least {minimum_bytes}"
+        )
+        return False
+
+    if pulse_proc is None or pulse_proc.poll() is not None or pulse_fifo_fd is None:
+        if not _restart_pulse_pipeline():
+            return False
+
+    view = memoryview(audio_bytes)
+    offset = 0
+    while offset < len(view):
+        try:
+            written = os.write(pulse_fifo_fd, view[offset:])
+            if written <= 0:
+                return False
+            print(f"   ↳ PulseAudio FIFO write wrote {written} bytes")
+            offset += written
+        except BlockingIOError:
+            continue
+        except BrokenPipeError:
+            print("⚠ PulseAudio FIFO broke, restarting pipeline")
+            if not _restart_pulse_pipeline():
+                return False
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                continue
+            print(f"⚠ PulseAudio FIFO write error: {e}")
+            return False
+
+    return True
+
+
+def stop_pulse_pipeline(remove_fifo=True):
+    """Stop FIFO writer and terminate the PulseAudio playback process."""
+    global pulse_proc, pulse_fifo_fd
+
+    if pulse_fifo_fd is not None:
+        try:
+            os.close(pulse_fifo_fd)
+        except OSError:
+            pass
+        pulse_fifo_fd = None
+
+    if pulse_proc is not None:
+        try:
+            pulse_proc.terminate()
+            pulse_proc.wait(timeout=2)
+        except Exception:
+            try:
+                pulse_proc.kill()
+                pulse_proc.wait(timeout=1)
+            except Exception:
+                pass
+        pulse_proc = None
+
+    if remove_fifo:
+        try:
+            if os.path.exists(PULSE_FIFO_PATH):
+                os.remove(PULSE_FIFO_PATH)
+        except OSError:
+            pass
 
 def audio_player_thread():
     """Dedicated thread for playing audio sequentially"""
@@ -191,41 +320,11 @@ def audio_player_thread():
                 audio_buffer = audio_buffer[buffer_size:]
                 
                 print(f"🔊 Audio player #{play_count}: Playing {len(chunk_to_play)} bytes...")
-                
-                try:
-                    # Play directly from memory via stdin.
-                    proc = subprocess.Popen(
-                        [
-                            'aplay',
-                            '-D', SPEAKER_DEVICE,
-                            '-f', 'S16_LE',
-                            '-r', str(SAMPLE_RATE),
-                            '-c', str(SPEAKER_CHANNELS),
-                            '-'
-                        ],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    
-                    print(f"   ✓ aplay started (PID: {proc.pid})")
-                    
-                    # Wait for playback to complete
-                    stdout_data, stderr_data = proc.communicate(input=chunk_to_play, timeout=5)
-                    returncode = proc.returncode
-                    
-                    if returncode == 0:
-                        print(f"   ✓ Playback complete\n")
-                    else:
-                        stderr_msg = stderr_data.decode('utf-8', errors='ignore')
-                        print(f"   ✗ Error (code {returncode}): {stderr_msg}\n")
-                        
-                except subprocess.TimeoutExpired:
-                    print(f"   ⚠ Timeout - killing process\n")
-                    proc.kill()
-                    proc.wait()
-                except Exception as e:
-                    print(f"   ✗ Playback error: {e}\n")
+
+                if write_to_pulse_fifo(chunk_to_play, minimum_bytes=buffer_size):
+                    print(f"   ✓ Queued to PulseAudio FIFO pipeline ({len(chunk_to_play)} bytes)\n")
+                else:
+                    print(f"   ⚠ Failed to write chunk to PulseAudio pipeline ({len(chunk_to_play)} bytes)\n")
         
         except Exception as e:
             print(f"❌ Audio player thread error: {e}\n")
@@ -233,6 +332,7 @@ def audio_player_thread():
     print("🎵 Audio player thread stopped\n")
 
 # Start audio player thread
+start_pulse_pipeline()
 player_thread = threading.Thread(target=audio_player_thread, daemon=True)
 player_thread.start()
 
@@ -498,8 +598,10 @@ if __name__ == '__main__':
         )
     except KeyboardInterrupt:
         print("\nShutting down...")
+    finally:
         audio_player_active = False
         audio_queue.put(None)
+        stop_pulse_pipeline()
         if camera_proc:
             camera_proc.terminate()
         if audio_proc:

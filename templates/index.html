@@ -814,8 +814,8 @@
                 await initAudioContext();
                 
                 micSourceNode = audioContext.createMediaStreamSource(stream);
-                //const bufferSize = 8192; // 170ms at 48kHz, good for low latency
-                const bufferSize = 16384;
+                const bufferSize = 4096; // 85ms at 48kHz, good for stability across browsers
+                // const bufferSize = 8192; // 170ms at 48kHz, good for low latency
 
                 // Keep voice frequencies and reduce low-frequency rumble / hiss.
                 voiceHighPass = audioContext.createBiquadFilter();
