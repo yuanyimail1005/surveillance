@@ -14,7 +14,6 @@ import threading
 import struct
 import re
 import werkzeug.serving
-import stat
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
@@ -49,6 +48,11 @@ TALKBACK_ECHO_CANCELLATION = True
 TALKBACK_NOISE_SUPPRESSION = True
 TALKBACK_AUTO_GAIN_CONTROL = False
 TALKBACK_LATENCY_SECONDS = 0.02
+try:
+    TALKBACK_PLAYBACK_GAIN = float(os.environ.get('TALKBACK_PLAYBACK_GAIN', '5.0'))
+except ValueError:
+    TALKBACK_PLAYBACK_GAIN = 5.0
+TALKBACK_PLAYBACK_GAIN = max(0.1, min(12.0, TALKBACK_PLAYBACK_GAIN))
 pulseaudio_started_by_app = False
 
 def find_pulse_sink(search_vendor='1908'):
@@ -73,16 +77,16 @@ def find_usb_device(device_type, search_name=None):
             cmd = ["aplay", "-l"]
         else:
             cmd = ["arecord", "-l"]
-        
+
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
+
         for line in result.stdout.split('\n'):
             if 'card' in line and ':' in line:
                 # Extract card number
                 parts = line.split('card ')
                 if len(parts) > 1:
                     card_num = parts[1].split(':')[0].strip()
-                    
+
                     # Match by search name if provided
                     if search_name:
                         if search_name.lower() in line.lower():
@@ -91,7 +95,7 @@ def find_usb_device(device_type, search_name=None):
                         # Return first USB device
                         if 'USB' in line or 'usb' in line.lower():
                             return card_num
-        
+
         return None
     except Exception as e:
         print(f"Error finding {device_type} device: {e}")
@@ -217,26 +221,14 @@ def _set_speaker_volume_percent(volume_percent):
     return None
 
 # Audio playback pipeline
-PULSE_FIFO_PATH = '/tmp/surveillance_pulse_fifo'
 pulse_proc = None
-pulse_fifo_fd = None
 pulse_write_lock = threading.Lock()
 
-def start_pulse_pipeline():
-    """Start one PulseAudio playback process and feed it through a named FIFO."""
-    global pulse_proc, pulse_fifo_fd
+def start_pulse_process():
+    """Start one PulseAudio playback process and feed it through stdin."""
+    global pulse_proc
 
     try:
-        if os.path.exists(PULSE_FIFO_PATH):
-            mode = os.stat(PULSE_FIFO_PATH).st_mode
-            if not stat.S_ISFIFO(mode):
-                try:
-                    os.remove(PULSE_FIFO_PATH)
-                except OSError:
-                    pass
-        if not os.path.exists(PULSE_FIFO_PATH):
-            os.mkfifo(PULSE_FIFO_PATH, 0o600)
-
         if pulse_proc is None or pulse_proc.poll() is not None:
             pulse_proc = subprocess.Popen(
                 [
@@ -247,74 +239,68 @@ def start_pulse_pipeline():
                     '--rate', str(SAMPLE_RATE),
                     '--channels', str(SPEAKER_CHANNELS),
                     '--device', PULSE_SINK_NAME,
-                    '--stream-name', 'surveillance-speaker',
-                    PULSE_FIFO_PATH
+                    '--stream-name', 'surveillance-speaker'
                 ],
+                stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 bufsize=0
             )
 
-        if pulse_fifo_fd is None:
-            # Blocking open/write ensures each queued chunk is fully delivered.
-            pulse_fifo_fd = os.open(PULSE_FIFO_PATH, os.O_WRONLY)
+        if pulse_proc.stdin is None:
+            raise RuntimeError('pacat stdin pipe is unavailable')
 
-        print(f"✓ PulseAudio FIFO pipeline started (PID: {pulse_proc.pid}, sink: {PULSE_SINK_NAME})")
+        print(f"✓ PulseAudio stdin pipeline started (PID: {pulse_proc.pid}, sink: {PULSE_SINK_NAME})")
         return True
     except Exception as e:
         print(f"✗ Failed to start PulseAudio pipeline: {e}")
         return False
 
-
 def _restart_pulse_pipeline():
     """Best-effort restart when PulseAudio playback exits or pipe breaks."""
-    stop_pulse_pipeline(remove_fifo=False)
-    return start_pulse_pipeline()
+    stop_pulse_pipeline()
+    return start_pulse_process()
 
-
-def write_to_pulse_fifo(audio_bytes):
-    """Write all bytes to PulseAudio FIFO."""
-    global pulse_fifo_fd
+def write_to_pulse_stdin(audio_bytes):
+    """Write all bytes to PulseAudio stdin."""
 
     if not audio_bytes:
         return True
 
-    if pulse_proc is None or pulse_proc.poll() is not None or pulse_fifo_fd is None:
+    if pulse_proc is None or pulse_proc.poll() is not None or pulse_proc.stdin is None:
         if not _restart_pulse_pipeline():
             return False
 
-    # Flask can handle concurrent requests; serialize FIFO writes to keep audio frames ordered.
+    # Flask can handle concurrent requests; serialize writes to keep audio frames ordered.
     with pulse_write_lock:
         view = memoryview(audio_bytes)
         offset = 0
         while offset < len(view):
             try:
-                written = os.write(pulse_fifo_fd, view[offset:])
+                written = pulse_proc.stdin.write(view[offset:])
                 if written <= 0:
                     return False
-                print(f"↳ PulseAudio FIFO wrote {written} bytes")
+                print(f"↳ PulseAudio stdin wrote {written} bytes")
                 offset += written
             except BrokenPipeError:
-                print("⚠ PulseAudio FIFO broke, restarting pipeline")
+                print("⚠ PulseAudio stdin pipe broke, restarting pipeline")
                 if not _restart_pulse_pipeline():
                     return False
             except OSError as e:
-                print(f"⚠ PulseAudio FIFO write error: {e}")
+                print(f"⚠ PulseAudio stdin write error: {e}")
                 return False
 
     return True
 
+def stop_pulse_pipeline():
+    """Stop stdin writer and terminate the PulseAudio playback process."""
+    global pulse_proc
 
-def stop_pulse_pipeline(remove_fifo=True):
-    """Stop FIFO writer and terminate the PulseAudio playback process."""
-    global pulse_proc, pulse_fifo_fd
-
-    if pulse_fifo_fd is not None:
+    if pulse_proc is not None and pulse_proc.stdin is not None:
         try:
-            os.close(pulse_fifo_fd)
+            pulse_proc.stdin.close()
         except OSError:
             pass
-        pulse_fifo_fd = None
 
     if pulse_proc is not None:
         try:
@@ -328,14 +314,7 @@ def stop_pulse_pipeline(remove_fifo=True):
                 pass
         pulse_proc = None
 
-    if remove_fifo:
-        try:
-            if os.path.exists(PULSE_FIFO_PATH):
-                os.remove(PULSE_FIFO_PATH)
-        except OSError:
-            pass
-
-if start_pulse_pipeline():
+if start_pulse_process():
     print("🎵 Direct audio write mode enabled (no intermediate queue)")
 else:
     print("⚠ Audio playback pipeline will retry on first write")
@@ -377,13 +356,13 @@ def start_audio():
             stderr=subprocess.PIPE,
             bufsize=4096
         )
-        
+
         time.sleep(0.)
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode('utf-8', errors='ignore')
             print(f"⚠ Audio process died: {stderr}\n")
             return None
-        
+
         print(f"✓ Audio recording started (Mono, {SAMPLE_RATE}Hz)\n")
         return proc
     except Exception as e:
@@ -470,7 +449,7 @@ def audio_feed_socket(ws):
         print('🎤 Audio socket disconnected')
 
 def convert_mono_to_stereo(mono_data):
-    """Convert mono audio to stereo by duplicating samples"""
+    """Convert mono audio to stereo and apply configurable playback gain."""
 
     sample_count = len(mono_data) // 2
     if sample_count == 0:
@@ -481,8 +460,14 @@ def convert_mono_to_stereo(mono_data):
 
     stereo_buffer = bytearray(sample_count * 4)
     offset = 0
+    gain = TALKBACK_PLAYBACK_GAIN
     for sample in mono_samples:
-        struct.pack_into('<hh', stereo_buffer, offset, sample, sample)
+        boosted = int(sample * gain)
+        if boosted > 32767:
+            boosted = 32767
+        elif boosted < -32768:
+            boosted = -32768
+        struct.pack_into('<hh', stereo_buffer, offset, boosted, boosted)
         offset += 4
 
     return bytes(stereo_buffer)
@@ -492,20 +477,29 @@ def convert_mono_to_stereo(mono_data):
 def talk_audio_socket(ws):
     """Receive mono PCM from the browser over WebSocket and play it immediately."""
     print('🎙 WebSocket talkback connected')
+    message_count = 0
+    received_bytes = 0
     try:
         while True:
             message = ws.receive()
             if message is None:
+                print('🎙 Talkback socket closed by client')
                 break
 
             if isinstance(message, str):
+                print(f'🎙 Talkback text frame ignored: {message[:80]}')
                 continue
 
             if not message:
                 continue
 
+            message_count += 1
+            received_bytes += len(message)
+            if message_count <= 3 or message_count % 25 == 0:
+                print(f'🎙 Talkback received chunk {message_count} ({len(message)} bytes, total {received_bytes} bytes)')
+
             stereo_data = convert_mono_to_stereo(message)
-            if stereo_data and not write_to_pulse_fifo(stereo_data):
+            if stereo_data and not write_to_pulse_stdin(stereo_data):
                 print('⚠ WebSocket talkback write failed')
                 break
     except Exception as e:

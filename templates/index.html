@@ -10,7 +10,7 @@
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -21,7 +21,7 @@
             padding: 12px;
             overflow: hidden;
         }
-        
+
         .container {
             background: white;
             border-radius: 15px;
@@ -32,27 +32,27 @@
             padding: 20px;
             overflow: auto;
         }
-        
+
         h1 {
             text-align: center;
             color: #333;
             margin-bottom: 16px;
             font-size: clamp(1.3rem, 2vw, 1.9rem);
         }
-        
+
         .content {
             display: grid;
             grid-template-columns: 1.35fr 1fr;
             gap: 16px;
             align-items: start;
         }
-        
+
         .video-section {
             display: flex;
             flex-direction: column;
             gap: 15px;
         }
-        
+
         #video-feed {
             width: 100%;
             aspect-ratio: 16 / 9;
@@ -64,7 +64,7 @@
             transform-origin: center center;
             transition: transform 0.22s ease;
         }
-        
+
         .controls-section {
             display: flex;
             flex-direction: column;
@@ -95,26 +95,26 @@
             color: #2f3640;
             font-size: 0.95em;
         }
-        
+
         .control-group {
             background: #f8f9fa;
             padding: 14px;
             border-radius: 10px;
             border-left: 4px solid #667eea;
         }
-        
+
         .control-group h3 {
             color: #333;
             margin-bottom: 15px;
             font-size: 1.1em;
         }
-        
+
         .button-group {
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
         }
-        
+
         button {
             flex: 1;
             min-width: 120px;
@@ -126,37 +126,37 @@
             cursor: pointer;
             transition: all 0.3s ease;
         }
-        
+
         .btn-primary {
             background: #667eea;
             color: white;
         }
-        
+
         .btn-primary:hover:not(:disabled) {
             background: #5568d3;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
         }
-        
+
         .btn-primary:disabled {
             background: #ccc;
             cursor: not-allowed;
         }
-        
+
         .btn-danger {
             background: #e74c3c;
             color: white;
         }
-        
+
         .btn-danger:hover:not(:disabled) {
             background: #c0392b;
         }
-        
+
         .btn-danger:disabled {
             background: #ccc;
             cursor: not-allowed;
         }
-        
+
         .status {
             padding: 12px;
             border-radius: 8px;
@@ -164,19 +164,19 @@
             font-weight: 600;
             margin-top: 10px;
         }
-        
+
         .status.active {
             background: #d4edda;
             color: #155724;
             border: 1px solid #c3e6cb;
         }
-        
+
         .status.inactive {
             background: #f8d7da;
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
-        
+
         .recording-indicator {
             display: inline-block;
             width: 12px;
@@ -186,12 +186,12 @@
             animation: pulse 1s infinite;
             margin-right: 8px;
         }
-        
+
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
-        
+
         .info-box {
             background: white;
             padding: 12px;
@@ -200,11 +200,11 @@
             font-size: 0.95em;
             line-height: 1.6;
         }
-        
+
         .info-box p {
             margin: 5px 0;
         }
-        
+
         .debug-box {
             background: #f5f5f5;
             border: 1px solid #ddd;
@@ -217,17 +217,17 @@
             overflow-y: auto;
             color: #666;
         }
-        
+
         .volume-meter {
             margin-top: 10px;
         }
-        
+
         .volume-meter p {
             font-size: 0.9em;
             margin-bottom: 5px;
             color: #333;
         }
-        
+
         .volume-bar-container {
             width: 100%;
             height: 20px;
@@ -251,7 +251,7 @@
             );
             pointer-events: none;
         }
-        
+
         .volume-bar {
             height: 100%;
             background: linear-gradient(90deg, #2ecc71 0%, #f1c40f 68%, #e74c3c 100%);
@@ -275,7 +275,7 @@
         .volume-bar.level-high {
             filter: saturate(1.2) brightness(1.06);
         }
-        
+
         .volume-text {
             font-size: 0.85em;
             color: #666;
@@ -306,7 +306,7 @@
             accent-color: #667eea;
             cursor: pointer;
         }
-        
+
         @media (max-width: 992px) {
             body {
                 overflow: auto;
@@ -374,7 +374,7 @@
             .content {
                 grid-template-columns: 1fr;
             }
-            
+
             h1 {
                 font-size: 1.5em;
             }
@@ -393,7 +393,7 @@
         data-talkback-latency-seconds="{{ talkback_latency_seconds }}"
     >
         <h1>🎥 Raspberry Pi Surveillance System</h1>
-        
+
         <div class="content">
             <div class="video-section">
                 <img id="video-feed" alt="Live Video Feed">
@@ -407,7 +407,7 @@
                     </select>
                 </div>
             </div>
-            
+
             <div class="controls-section">
                 <div class="control-group">
                     <h3>🎤 Listen to Microphone</h3>
@@ -427,7 +427,7 @@
                         <p class="volume-text" id="listen-volume-text">0%</p>
                     </div>
                 </div>
-                
+
                 <div class="control-group">
                     <h3>🎙️ Talk to Speaker</h3>
                     <div class="button-group">
@@ -463,7 +463,7 @@
                     </div>
                     <div class="debug-box" id="debug-box"></div>
                 </div>
-                
+
                 <div class="control-group">
                     <h3>ℹ️ System Info</h3>
                     <div class="info-box">
@@ -896,9 +896,9 @@
                     int16Array.length,
                     48000
                 );
-                
+
                 const channelData = audioBuffer.getChannelData(0);
-                
+
                 let sumSq = 0;
                 for (let i = 0; i < int16Array.length; i++) {
                     let s = int16Array[i] / 32768.0;
@@ -910,7 +910,7 @@
                 const rms = Math.sqrt(sumSq / int16Array.length);
                 const volumePercent = rmsToPercent(rms);
                 updateVolumeMeter('listen-volume-bar', 'listen-volume-text', volumePercent, 'listen');
-                
+
                 const source = audioContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(listenGainNode || audioContext.destination);
@@ -939,7 +939,7 @@
             try {
                 const sessionId = ++talkSessionId;
                 debug('Requesting microphone permission...');
-                const stream = await navigator.mediaDevices.getUserMedia({ 
+                const stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: TALKBACK_CONFIG.echoCancellation,
                         noiseSuppression: TALKBACK_CONFIG.noiseSuppression,
@@ -951,18 +951,20 @@
                 });
                 micStream = stream;
                 debug('Microphone access granted');
-                
+
                 // Check microphone volume
                 const audioTracks = stream.getAudioTracks();
                 console.log('Audio tracks:', audioTracks);
                 audioTracks.forEach(track => {
                     console.log('Track settings:', track.getSettings());
                 });
-                
+
                 await initAudioContext();
                 await ensureTalkWorkletModule();
                 talkSocket = await createTalkSocket(sessionId);
-                
+                isTalking = true;
+                updateUIStatus('talk', true);
+
                 micSourceNode = audioContext.createMediaStreamSource(stream);
 
                 // Keep voice frequencies and reduce low-frequency rumble / hiss.
@@ -982,7 +984,7 @@
                         chunkSamples: TALKBACK_CONFIG.chunkSamples
                     }
                 });
-                
+
                 let sendCount = 0;
                 talkWorkletNode.port.onmessage = (event) => {
                     if (!isTalking || sessionId !== talkSessionId) return;
@@ -995,25 +997,24 @@
                     const volumePercent = rmsToPercent(rms);
 
                     updateVolumeMeter('volume-bar', 'volume-text', volumePercent, 'talk');
-                    
+
                     // Log every 10th chunk
                     sendCount++;
                     if (sendCount % 10 === 0) {
                         debug(`Volume: ${volumePercent}% (RMS: ${rms.toFixed(4)})`);
                     }
 
-                    // Simple noise gate for very low-level background noise.
-                    if (rms < 0.008) {
-                        return;
-                    }
-
                     if (!talkSocket || talkSocket.readyState !== WebSocket.OPEN) {
                         return;
                     }
 
-                    talkSocket.send(event.data.pcm16);
+                    try {
+                        talkSocket.send(event.data.pcm16);
+                    } catch (sendError) {
+                        debug(`Talkback send failed: ${sendError.message}`);
+                    }
                 };
-                
+
                 micSourceNode.connect(voiceHighPass);
                 voiceHighPass.connect(voiceLowPass);
                 voiceLowPass.connect(talkWorkletNode);
@@ -1023,9 +1024,6 @@
                 silentMonitorGain.gain.value = 0;
                 talkWorkletNode.connect(silentMonitorGain);
                 silentMonitorGain.connect(audioContext.destination);
-
-                isTalking = true;
-                updateUIStatus('talk', true);
                 debug(`Recording and streaming ${TALKBACK_CONFIG.chunkSamples} samples over WebSocket`);
 
             } catch (error) {
@@ -1111,24 +1109,24 @@
             if (type === 'listen') {
                 const btn = document.getElementById('listen-btn');
                 const status = document.getElementById('listen-status');
-                
+
                 btn.className = isActive ? 'btn-danger' : 'btn-primary';
                 btn.textContent = isActive ? '⏹ Stop Listening' : '▶ Start Listening';
-                
+
                 status.className = isActive ? 'status active' : 'status inactive';
-                status.innerHTML = isActive ? 
-                    '<span class="recording-indicator"></span>Speaker: On' : 
+                status.innerHTML = isActive ?
+                    '<span class="recording-indicator"></span>Speaker: On' :
                     'Speaker: Off';
             } else if (type === 'talk') {
                 const btn = document.getElementById('talk-btn');
                 const status = document.getElementById('talk-status');
-                
+
                 btn.className = isActive ? 'btn-danger' : 'btn-primary';
                 btn.textContent = isActive ? '⏹ Stop Talking' : '🎤 Start Talking';
-                
+
                 status.className = isActive ? 'status active' : 'status inactive';
-                status.innerHTML = isActive ? 
-                    '<span class="recording-indicator"></span>Microphone Input: On' : 
+                status.innerHTML = isActive ?
+                    '<span class="recording-indicator"></span>Microphone Input: On' :
                     'Microphone Input: Off';
             }
         }
