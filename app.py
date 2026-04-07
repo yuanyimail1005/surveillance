@@ -1,8 +1,9 @@
 import os
 os.environ['ALSA_CARD'] = 'default'
 
-from flask import Flask, render_template, Response, request, jsonify
+from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
+from flask_sock import Sock
 import subprocess
 import time
 import logging
@@ -27,6 +28,7 @@ werkzeug.serving.connection_dropped_errors = (
 
 app = Flask(__name__)
 CORS(app)
+sock = Sock(app)
 
 print("\n" + "="*60)
 print("Raspberry Pi Surveillance System - Starting")
@@ -40,6 +42,13 @@ SAMPLE_RATE = 48000               # Matches successful test
 MIC_CHANNELS = 1
 SPEAKER_CHANNELS = 2
 AUDIO_PLAYER_NICE = int(os.environ.get('AUDIO_PLAYER_NICE', '0'))
+TALKBACK_HIGHPASS_HZ = 100
+TALKBACK_LOWPASS_HZ = 5000
+TALKBACK_WORKLET_CHUNK_SAMPLES = 8192
+TALKBACK_ECHO_CANCELLATION = True
+TALKBACK_NOISE_SUPPRESSION = True
+TALKBACK_AUTO_GAIN_CONTROL = False
+TALKBACK_LATENCY_SECONDS = 0.02
 pulseaudio_started_by_app = False
 
 def find_pulse_sink(search_vendor='1908'):
@@ -283,7 +292,7 @@ def write_to_pulse_fifo(audio_bytes):
                 written = os.write(pulse_fifo_fd, view[offset:])
                 if written <= 0:
                     return False
-                print(f"   ↳ PulseAudio FIFO write wrote {written} bytes")
+                print(f"↳ PulseAudio FIFO wrote {written} bytes")
                 offset += written
             except BrokenPipeError:
                 print("⚠ PulseAudio FIFO broke, restarting pipeline")
@@ -387,113 +396,122 @@ audio_proc = start_audio()
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template(
+        'index.html',
+        talkback_highpass_hz=TALKBACK_HIGHPASS_HZ,
+        talkback_lowpass_hz=TALKBACK_LOWPASS_HZ,
+        talkback_chunk_samples=TALKBACK_WORKLET_CHUNK_SAMPLES,
+        talkback_echo_cancellation=TALKBACK_ECHO_CANCELLATION,
+        talkback_noise_suppression=TALKBACK_NOISE_SUPPRESSION,
+        talkback_auto_gain_control=TALKBACK_AUTO_GAIN_CONTROL,
+        talkback_latency_seconds=TALKBACK_LATENCY_SECONDS,
+    )
 
-@app.route('/video_feed')
-def video_feed():
-    """Stream video frames by reading MJPEG from camera process stdout"""
+@sock.route('/video_feed')
+def video_feed_socket(ws):
+    """Stream JPEG frames over WebSocket from camera stdout."""
     global camera_proc
     if not camera_proc or camera_proc.poll() is not None:
-        print("📹 Camera: process not available")
-        return Response("Camera not available", status=500)
+        print('📹 Video socket: camera not available')
+        return
 
-    def generate():
-        buffer = b''
-        boundary = b'--frame\r\n'
-        try:
+    print('📹 Video socket connected')
+    buffer = b''
+    try:
+        while True:
+            chunk = camera_proc.stdout.read(4096)
+            if not chunk:
+                time.sleep(0.01)
+                continue
+            buffer += chunk
+
             while True:
-                chunk = camera_proc.stdout.read(4096)
-                if not chunk:
-                    time.sleep(0.01)
-                    continue
-                buffer += chunk
-
-                # Extract complete JPEGs from the stream using SOI/EOI markers
-                while True:
-                    start = buffer.find(b'\xff\xd8')
-                    end = buffer.find(b'\xff\xd9', start + 2)
-                    if start != -1 and end != -1:
-                        jpg = buffer[start:end + 2]
-                        buffer = buffer[end + 2:]
-                        yield (boundary +
-                               b'Content-Type: image/jpeg\r\n\r\n' +
-                               jpg + b'\r\n')
-                    else:
-                        break
-        except GeneratorExit:
-            return
-        except Exception as e:
-            print(f"📹 Video stream error: {e}")
-            time.sleep(0.1)
-
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@app.route('/audio_feed')
-def audio_feed():
-    """Stream audio from microphone"""
-    if not audio_proc:
-        print("🎤 Audio: No audio process available")
-        return Response("Audio not available", status=500)
-    
-    def generate():
-        try:
-            chunk_count = 0
-            while True:
-                chunk = audio_proc.stdout.read(4096)
-                if not chunk:
-                    print("🎤 Audio: End of stream")
+                start = buffer.find(b'\xff\xd8')
+                if start == -1:
                     break
-                
-                chunk_count += 1
-                if chunk_count % 50 == 0:
-                    print(f"🎤 Audio: Sent chunk {chunk_count} ({len(chunk)} bytes)")
-                
-                yield chunk
-        except Exception as e:
-            print(f"🎤 Audio stream error: {e}")
-    
-    return Response(generate(), mimetype=f'audio/L16; rate={SAMPLE_RATE}')
+                end = buffer.find(b'\xff\xd9', start + 2)
+                if end == -1:
+                    break
+
+                jpg = buffer[start:end + 2]
+                buffer = buffer[end + 2:]
+                ws.send(jpg)
+    except Exception as e:
+        print(f'📹 Video socket closed: {e}')
+    finally:
+        print('📹 Video socket disconnected')
+
+
+@sock.route('/audio_feed')
+def audio_feed_socket(ws):
+    """Stream mono microphone PCM over WebSocket."""
+    global audio_proc
+    if not audio_proc or audio_proc.poll() is not None:
+        print('🎤 Audio socket: audio process not available')
+        return
+
+    print('🎤 Audio socket connected')
+    try:
+        chunk_count = 0
+        while True:
+            chunk = audio_proc.stdout.read(4096)
+            if not chunk:
+                print('🎤 Audio socket: End of stream')
+                break
+
+            chunk_count += 1
+            if chunk_count % 50 == 0:
+                print(f'🎤 Audio socket: sent chunk {chunk_count} ({len(chunk)} bytes)')
+
+            ws.send(chunk)
+    except Exception as e:
+        print(f'🎤 Audio socket closed: {e}')
+    finally:
+        print('🎤 Audio socket disconnected')
 
 def convert_mono_to_stereo(mono_data):
     """Convert mono audio to stereo by duplicating samples"""
-    
-    # Convert bytes to mono samples
-    mono_samples = struct.unpack(f'<{len(mono_data)//2}h', mono_data)
-    
-    # Create stereo by interleaving left and right (both same)
-    stereo_bytes = b''
+
+    sample_count = len(mono_data) // 2
+    if sample_count == 0:
+        return b''
+
+    mono_data = mono_data[:sample_count * 2]
+    mono_samples = struct.unpack(f'<{sample_count}h', mono_data)
+
+    stereo_buffer = bytearray(sample_count * 4)
+    offset = 0
     for sample in mono_samples:
-        # Write left channel (mono sample)
-        stereo_bytes += struct.pack('<h', sample)
-        # Write right channel (duplicate)
-        stereo_bytes += struct.pack('<h', sample)
-    
-    return stereo_bytes
+        struct.pack_into('<hh', stereo_buffer, offset, sample, sample)
+        offset += 4
 
-@app.route('/play_audio', methods=['POST'])
-def play_audio():
-    """Play audio on speaker by writing directly to the PulseAudio FIFO."""
+    return bytes(stereo_buffer)
+
+
+@sock.route('/ws/talk')
+def talk_audio_socket(ws):
+    """Receive mono PCM from the browser over WebSocket and play it immediately."""
+    print('🎙 WebSocket talkback connected')
     try:
-        mono_data = request.data
-        if not mono_data:
-            return jsonify({'status': 'ok'})
-        
-        print(f"📥 Received audio: {len(mono_data)} bytes")
-        
-        # Convert mono to stereo
-        stereo_data = convert_mono_to_stereo(mono_data)
-        
-        print(f"🔄 Converted: {len(mono_data)} → {len(stereo_data)} bytes")
+        while True:
+            message = ws.receive()
+            if message is None:
+                break
 
-        if not write_to_pulse_fifo(stereo_data):
-            return jsonify({'status': 'error', 'message': 'Audio write failed'}), 503
+            if isinstance(message, str):
+                continue
 
-        print(f"📤 Wrote to PulseAudio FIFO ({len(stereo_data)} bytes)\n")
-        
-        return jsonify({'status': 'ok'})
+            if not message:
+                continue
+
+            stereo_data = convert_mono_to_stereo(message)
+            if stereo_data and not write_to_pulse_fifo(stereo_data):
+                print('⚠ WebSocket talkback write failed')
+                break
     except Exception as e:
-        print(f"❌ Play audio endpoint error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print(f'⚠ WebSocket talkback closed: {e}')
+    finally:
+        print('🎙 WebSocket talkback disconnected')
 
 
 @app.route('/speaker_volume', methods=['GET'])

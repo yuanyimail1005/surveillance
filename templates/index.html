@@ -382,12 +382,21 @@
     </style>
 </head>
 <body>
-    <div class="container">
+    <div
+        class="container"
+        data-talkback-highpass-hz="{{ talkback_highpass_hz }}"
+        data-talkback-lowpass-hz="{{ talkback_lowpass_hz }}"
+        data-talkback-chunk-samples="{{ talkback_chunk_samples }}"
+        data-talkback-echo-cancellation="{{ talkback_echo_cancellation | lower }}"
+        data-talkback-noise-suppression="{{ talkback_noise_suppression | lower }}"
+        data-talkback-auto-gain-control="{{ talkback_auto_gain_control | lower }}"
+        data-talkback-latency-seconds="{{ talkback_latency_seconds }}"
+    >
         <h1>🎥 Raspberry Pi Surveillance System</h1>
         
         <div class="content">
             <div class="video-section">
-                <img id="video-feed" src="/video_feed" alt="Live Video Feed">
+                <img id="video-feed" alt="Live Video Feed">
                 <div class="video-tools">
                     <label for="camera-rotation">Camera Rotation</label>
                     <select id="camera-rotation" class="rotation-select">
@@ -474,20 +483,33 @@
         let mediaRecorder = null;
         let audioContext = null;
         let micStream = null;
-        let audioProcessor = null;
+        let talkWorkletNode = null;
         let micSourceNode = null;
         let voiceHighPass = null;
         let voiceLowPass = null;
         let silentMonitorGain = null;
         let listenGainNode = null;
         let talkSessionId = 0;
-        const activeSendControllers = new Set();
-        let listenAbortController = null;
         let nextListenPlayTime = 0;
         let listenMeterSmooth = 0;
         let talkMeterSmooth = 0;
+        let videoSocket = null;
+        let videoFrameUrl = null;
+        let listenSocket = null;
+        let talkSocket = null;
+        let talkWorkletModulePromise = null;
         let speakerVolumeDebounceTimer = null;
         const ROTATION_STORAGE_KEY = 'cameraRotationDegrees';
+        const appContainer = document.querySelector('.container');
+        const TALKBACK_CONFIG = {
+            highPassHz: Number(appContainer?.dataset.talkbackHighpassHz || 100),
+            lowPassHz: Number(appContainer?.dataset.talkbackLowpassHz || 5000),
+            chunkSamples: Number(appContainer?.dataset.talkbackChunkSamples || 8192),
+            echoCancellation: appContainer?.dataset.talkbackEchoCancellation !== 'false',
+            noiseSuppression: appContainer?.dataset.talkbackNoiseSuppression !== 'false',
+            autoGainControl: appContainer?.dataset.talkbackAutoGainControl === 'true',
+            latencySeconds: Number(appContainer?.dataset.talkbackLatencySeconds || 0.02)
+        };
 
         // Debug logging
         function debug(msg) {
@@ -515,14 +537,118 @@
             }
         }
 
-        // Convert Float32 to Int16
-        function float32ToInt16(float32Array) {
-            const int16Array = new Int16Array(float32Array.length);
-            for (let i = 0; i < float32Array.length; i++) {
-                const sample = Math.max(-1, Math.min(1, float32Array[i]));
-                int16Array[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        async function ensureTalkWorkletModule() {
+            if (!audioContext || !audioContext.audioWorklet) {
+                throw new Error('AudioWorklet is not supported in this browser');
             }
-            return int16Array;
+
+            if (!talkWorkletModulePromise) {
+                talkWorkletModulePromise = audioContext.audioWorklet.addModule('/static/talk-capture-processor.js');
+            }
+
+            await talkWorkletModulePromise;
+        }
+
+        function createTalkSocket(sessionId) {
+            return new Promise((resolve, reject) => {
+                const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                const socket = new WebSocket(`${scheme}://${window.location.host}/ws/talk`);
+                socket.binaryType = 'arraybuffer';
+
+                socket.addEventListener('open', () => {
+                    debug('Talkback WebSocket connected');
+                    resolve(socket);
+                }, { once: true });
+
+                socket.addEventListener('error', () => {
+                    reject(new Error('WebSocket connection failed'));
+                }, { once: true });
+
+                socket.addEventListener('close', () => {
+                    if (sessionId !== talkSessionId) {
+                        return;
+                    }
+                    debug('Talkback WebSocket disconnected');
+                    if (isTalking) {
+                        stopTalking();
+                    }
+                });
+            });
+        }
+
+        function createListenSocket() {
+            return new Promise((resolve, reject) => {
+                const socket = openBinarySocket('/audio_feed', 'arraybuffer');
+
+                socket.addEventListener('open', () => {
+                    resolve(socket);
+                }, { once: true });
+
+                socket.addEventListener('error', () => {
+                    reject(new Error('Audio WebSocket unavailable'));
+                }, { once: true });
+            });
+        }
+
+        function openBinarySocket(path, binaryType) {
+            const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const socket = new WebSocket(`${scheme}://${window.location.host}${path}`);
+            socket.binaryType = binaryType;
+            return socket;
+        }
+
+        function startVideoStream() {
+            const feed = document.getElementById('video-feed');
+            if (!feed) return;
+
+            if (videoSocket && (videoSocket.readyState === WebSocket.OPEN || videoSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
+            videoSocket = openBinarySocket('/video_feed', 'blob');
+
+            videoSocket.addEventListener('open', () => {
+                debug('Video WebSocket connected');
+            });
+
+            videoSocket.addEventListener('message', (event) => {
+                if (!(event.data instanceof Blob)) {
+                    return;
+                }
+
+                const frameUrl = URL.createObjectURL(event.data);
+                const previousUrl = videoFrameUrl;
+                videoFrameUrl = frameUrl;
+                feed.src = frameUrl;
+                if (previousUrl) {
+                    URL.revokeObjectURL(previousUrl);
+                }
+            });
+
+            videoSocket.addEventListener('close', () => {
+                debug('Video WebSocket disconnected');
+                videoSocket = null;
+                setTimeout(() => {
+                    if (!document.hidden) {
+                        startVideoStream();
+                    }
+                }, 1200);
+            });
+
+            videoSocket.addEventListener('error', () => {
+                debug('Video WebSocket error');
+            });
+        }
+
+        function stopVideoStream() {
+            if (videoSocket) {
+                videoSocket.close();
+                videoSocket = null;
+            }
+            if (videoFrameUrl) {
+                URL.revokeObjectURL(videoFrameUrl);
+                videoFrameUrl = null;
+            }
         }
 
         function rmsToPercent(rms) {
@@ -718,57 +844,44 @@
                 await initAudioContext();
                 isListening = true;
                 nextListenPlayTime = audioContext.currentTime;
-                listenAbortController = new AbortController();
                 updateUIStatus('listen', true);
-                debug('Starting remote audio stream...');
-                
-                const response = await fetch('/audio_feed', { signal: listenAbortController.signal });
-                if (!response.ok || !response.body) {
-                    throw new Error(`Audio stream unavailable (${response.status})`);
-                }
+                debug('Starting remote audio stream over WebSocket...');
 
-                const reader = response.body.getReader();
-                
-                while (isListening) {
-                    try {
-                        const { done, value } = await reader.read();
-                        if (done) {
-                            debug('Remote stream ended');
-                            break;
-                        }
-                        
-                        // Convert bytes to Int16Array and play
-                        const sampleCount = Math.floor(value.length / 2);
-                        if (sampleCount === 0) {
-                            continue;
-                        }
-                        const int16Array = new Int16Array(value.buffer, value.byteOffset, sampleCount);
-                        playAudioChunk(int16Array);
-                        
-                    } catch (e) {
-                        if (e.name === 'AbortError') {
-                            break;
-                        }
-                        debug(`Read error: ${e.message}`);
-                        break;
+                listenSocket = await createListenSocket();
+                debug('Audio WebSocket connected');
+                listenSocket.addEventListener('message', (event) => {
+                    if (!isListening || !(event.data instanceof ArrayBuffer)) {
+                        return;
                     }
-                }
+
+                    const sampleCount = Math.floor(event.data.byteLength / 2);
+                    if (sampleCount <= 0) {
+                        return;
+                    }
+                    const int16Array = new Int16Array(event.data, 0, sampleCount);
+                    playAudioChunk(int16Array);
+                });
+                listenSocket.addEventListener('close', () => {
+                    if (!isListening) {
+                        return;
+                    }
+                    debug('Remote audio stream ended');
+                    stopListening();
+                });
             } catch (error) {
-                if (error.name !== 'AbortError') {
-                    debug(`Listen error: ${error.message}`);
-                }
+                debug(`Listen error: ${error.message}`);
                 isListening = false;
                 updateUIStatus('listen', false);
-            } finally {
-                listenAbortController = null;
             }
         }
 
         function stopListening() {
             isListening = false;
-            if (listenAbortController) {
-                listenAbortController.abort();
-                listenAbortController = null;
+            if (listenSocket) {
+                if (listenSocket.readyState === WebSocket.OPEN || listenSocket.readyState === WebSocket.CONNECTING) {
+                    listenSocket.close();
+                }
+                listenSocket = null;
             }
             resetVolumeMeter('listen-volume-bar', 'listen-volume-text', 'listen');
             updateUIStatus('listen', false);
@@ -828,12 +941,12 @@
                 debug('Requesting microphone permission...');
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
+                        echoCancellation: TALKBACK_CONFIG.echoCancellation,
+                        noiseSuppression: TALKBACK_CONFIG.noiseSuppression,
+                        autoGainControl: TALKBACK_CONFIG.autoGainControl,
                         channelCount: 1,
                         sampleRate: 48000,
-                        latency: 0.02
+                        latency: TALKBACK_CONFIG.latencySeconds
                     }
                 });
                 micStream = stream;
@@ -847,40 +960,38 @@
                 });
                 
                 await initAudioContext();
+                await ensureTalkWorkletModule();
+                talkSocket = await createTalkSocket(sessionId);
                 
                 micSourceNode = audioContext.createMediaStreamSource(stream);
-                // const bufferSize = 4096; // 85ms at 48kHz, good for stability across browsers
-                const bufferSize = 8192; // 170ms at 48kHz, good for low latency
 
                 // Keep voice frequencies and reduce low-frequency rumble / hiss.
                 voiceHighPass = audioContext.createBiquadFilter();
                 voiceHighPass.type = 'highpass';
-                voiceHighPass.frequency.value = 120;
+                voiceHighPass.frequency.value = TALKBACK_CONFIG.highPassHz;
 
                 voiceLowPass = audioContext.createBiquadFilter();
                 voiceLowPass.type = 'lowpass';
-                voiceLowPass.frequency.value = 3600;
-                
-                // Create analyser for volume detection
-                const analyser = audioContext.createAnalyser();
-                analyser.fftSize = 2048;
-                micSourceNode.connect(analyser);
-                
-                // Use ScriptProcessor for audio capture
-                audioProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+                voiceLowPass.frequency.value = TALKBACK_CONFIG.lowPassHz;
+
+                talkWorkletNode = new AudioWorkletNode(audioContext, 'talk-capture-processor', {
+                    numberOfInputs: 1,
+                    numberOfOutputs: 1,
+                    channelCount: 1,
+                    processorOptions: {
+                        chunkSamples: TALKBACK_CONFIG.chunkSamples
+                    }
+                });
                 
                 let sendCount = 0;
-                audioProcessor.onaudioprocess = async (event) => {
+                talkWorkletNode.port.onmessage = (event) => {
                     if (!isTalking || sessionId !== talkSessionId) return;
-                    
-                    const inputData = event.inputBuffer.getChannelData(0);
-                    
-                    // Calculate volume
-                    let sum = 0;
-                    for (let i = 0; i < inputData.length; i++) {
-                        sum += inputData[i] * inputData[i];
+
+                    if (event.data?.type !== 'chunk') {
+                        return;
                     }
-                    const rms = Math.sqrt(sum / inputData.length);
+
+                    const rms = Number(event.data.rms) || 0;
                     const volumePercent = rmsToPercent(rms);
 
                     updateVolumeMeter('volume-bar', 'volume-text', volumePercent, 'talk');
@@ -896,41 +1007,59 @@
                         return;
                     }
 
-                    const int16Data = float32ToInt16(inputData);
-                    
-                    // Send to server
-                    const controller = new AbortController();
-                    activeSendControllers.add(controller);
-                    try {
-                        await fetch('/play_audio', {
-                            method: 'POST',
-                            body: int16Data.buffer,
-                            signal: controller.signal
-                        });
-                    } catch (e) {
-                        if (e.name !== 'AbortError') {
-                            console.error('Send error:', e);
-                        }
-                    } finally {
-                        activeSendControllers.delete(controller);
+                    if (!talkSocket || talkSocket.readyState !== WebSocket.OPEN) {
+                        return;
                     }
+
+                    talkSocket.send(event.data.pcm16);
                 };
                 
                 micSourceNode.connect(voiceHighPass);
                 voiceHighPass.connect(voiceLowPass);
-                voiceLowPass.connect(audioProcessor);
+                voiceLowPass.connect(talkWorkletNode);
 
-                // ScriptProcessor must stay connected to run in all browsers.
+                // Keep the worklet in a live graph without monitoring audio locally.
                 silentMonitorGain = audioContext.createGain();
                 silentMonitorGain.gain.value = 0;
-                audioProcessor.connect(silentMonitorGain);
+                talkWorkletNode.connect(silentMonitorGain);
                 silentMonitorGain.connect(audioContext.destination);
 
                 isTalking = true;
                 updateUIStatus('talk', true);
-                debug('Recording and sending audio at 48000Hz');
+                debug(`Recording and streaming ${TALKBACK_CONFIG.chunkSamples} samples over WebSocket`);
 
             } catch (error) {
+                if (talkWorkletNode) {
+                    talkWorkletNode.port.onmessage = null;
+                    talkWorkletNode.disconnect();
+                    talkWorkletNode = null;
+                }
+                if (voiceLowPass) {
+                    voiceLowPass.disconnect();
+                    voiceLowPass = null;
+                }
+                if (voiceHighPass) {
+                    voiceHighPass.disconnect();
+                    voiceHighPass = null;
+                }
+                if (silentMonitorGain) {
+                    silentMonitorGain.disconnect();
+                    silentMonitorGain = null;
+                }
+                if (micSourceNode) {
+                    micSourceNode.disconnect();
+                    micSourceNode = null;
+                }
+                if (micStream) {
+                    micStream.getTracks().forEach(track => track.stop());
+                    micStream = null;
+                }
+                if (talkSocket) {
+                    talkSocket.close();
+                    talkSocket = null;
+                }
+                resetVolumeMeter('volume-bar', 'volume-text', 'talk');
+                updateUIStatus('talk', false);
                 debug(`Microphone error: ${error.message}`);
                 alert('Could not access your microphone. Please check permissions.');
             }
@@ -940,15 +1069,10 @@
             isTalking = false;
             talkSessionId++;
 
-            for (const controller of activeSendControllers) {
-                controller.abort();
-            }
-            activeSendControllers.clear();
-
-            if (audioProcessor) {
-                audioProcessor.onaudioprocess = null;
-                audioProcessor.disconnect();
-                audioProcessor = null;
+            if (talkWorkletNode) {
+                talkWorkletNode.port.onmessage = null;
+                talkWorkletNode.disconnect();
+                talkWorkletNode = null;
             }
             if (voiceLowPass) {
                 voiceLowPass.disconnect();
@@ -969,6 +1093,12 @@
             if (micStream) {
                 micStream.getTracks().forEach(track => track.stop());
                 micStream = null;
+            }
+            if (talkSocket) {
+                if (talkSocket.readyState === WebSocket.OPEN || talkSocket.readyState === WebSocket.CONNECTING) {
+                    talkSocket.close();
+                }
+                talkSocket = null;
             }
 
             resetVolumeMeter('volume-bar', 'volume-text', 'talk');
@@ -1005,12 +1135,14 @@
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
+            stopVideoStream();
             stopListening();
             stopTalking();
         });
 
         initializeSpeakerVolumeControl();
         initializeCameraRotationControl();
+        startVideoStream();
         refreshSystemStatus();
         setInterval(refreshSystemStatus, 5000);
 
