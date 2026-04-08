@@ -406,6 +406,13 @@
                         <option value="270">270°</option>
                     </select>
                 </div>
+                <div class="video-tools">
+                    <label for="server-mic-select">🎤 Server Microphone</label>
+                    <select id="server-mic-select" class="rotation-select"></select>
+                    <label for="server-speaker-select" style="margin-top:10px; display:block;">🔈 Server Speaker</label>
+                    <select id="server-speaker-select" class="rotation-select" style="margin-top:4px;"></select>
+                    <p class="volume-text" id="server-device-status">Loading server audio devices...</p>
+                </div>
             </div>
 
             <div class="controls-section">
@@ -496,10 +503,18 @@
         let videoSocket = null;
         let videoFrameUrl = null;
         let listenSocket = null;
+        let listenReconnectTimer = null;
         let talkSocket = null;
         let talkWorkletModulePromise = null;
         let speakerVolumeDebounceTimer = null;
+        let droppedListenChunks = 0;
+        let serverMicOptions = [];
+        let serverSpeakerOptions = [];
+        let selectedServerMic = 'default';
+        let selectedServerSpeaker = '@DEFAULT_SINK@';
         const ROTATION_STORAGE_KEY = 'cameraRotationDegrees';
+        const LISTEN_MIN_LEAD_SECONDS = 0.02;
+        const LISTEN_MAX_BUFFER_SECONDS = 0.4;
         const appContainer = document.querySelector('.container');
         const TALKBACK_CONFIG = {
             highPassHz: Number(appContainer?.dataset.talkbackHighpassHz || 100),
@@ -769,6 +784,114 @@
             fetchSpeakerVolume();
         }
 
+        function populateServerDeviceSelect(selectId, options, selectedId) {
+            const select = document.getElementById(selectId);
+            if (!select) return;
+            select.innerHTML = '';
+
+            options.forEach(optionData => {
+                const option = document.createElement('option');
+                option.value = optionData.id;
+                option.textContent = optionData.name;
+                select.appendChild(option);
+            });
+
+            const hasSelected = options.some(item => item.id === selectedId);
+            if (hasSelected) {
+                select.value = selectedId;
+            } else if (options.length > 0) {
+                select.value = options[0].id;
+            }
+        }
+
+        async function loadServerAudioDevices() {
+            const status = document.getElementById('server-device-status');
+            try {
+                const response = await fetch('/server_audio_devices');
+                const data = await response.json();
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+
+                serverMicOptions = Array.isArray(data.microphones) ? data.microphones : [];
+                serverSpeakerOptions = Array.isArray(data.speakers) ? data.speakers : [];
+                selectedServerMic = data.selected_microphone || 'default';
+                selectedServerSpeaker = data.selected_speaker || '@DEFAULT_SINK@';
+
+                populateServerDeviceSelect('server-mic-select', serverMicOptions, selectedServerMic);
+                populateServerDeviceSelect('server-speaker-select', serverSpeakerOptions, selectedServerSpeaker);
+
+                if (status) {
+                    status.textContent = `Server devices loaded: ${serverMicOptions.length} microphones, ${serverSpeakerOptions.length} speakers`;
+                }
+            } catch (error) {
+                if (status) {
+                    status.textContent = `Server audio device load failed: ${error.message}`;
+                }
+            }
+        }
+
+        async function applyServerAudioSelection() {
+            const micSelect = document.getElementById('server-mic-select');
+            const speakerSelect = document.getElementById('server-speaker-select');
+            const status = document.getElementById('server-device-status');
+
+            if (!micSelect || !speakerSelect) {
+                return;
+            }
+
+            const requestedMic = micSelect.value;
+            const requestedSpeaker = speakerSelect.value;
+            if (status) {
+                status.textContent = 'Applying server device selection...';
+            }
+
+            try {
+                const response = await fetch('/server_audio_devices/select', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        microphone: requestedMic,
+                        speaker: requestedSpeaker
+                    })
+                });
+                const data = await response.json();
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+
+                selectedServerMic = data.selected_microphone;
+                selectedServerSpeaker = data.selected_speaker;
+                if (status) {
+                    status.textContent = 'Server audio device selection applied';
+                }
+                debug(`Server devices set: mic=${selectedServerMic}, speaker=${selectedServerSpeaker}`);
+            } catch (error) {
+                if (status) {
+                    status.textContent = `Failed to apply server device selection: ${error.message}`;
+                }
+            }
+        }
+
+        function initializeServerAudioDeviceControls() {
+            const micSelect = document.getElementById('server-mic-select');
+            const speakerSelect = document.getElementById('server-speaker-select');
+
+            if (micSelect) {
+                micSelect.addEventListener('change', () => {
+                    applyServerAudioSelection();
+                });
+            }
+
+            if (speakerSelect) {
+                speakerSelect.addEventListener('change', () => {
+                    applyServerAudioSelection();
+                });
+            }
+
+            loadServerAudioDevices();
+        }
+
         function applyCameraRotation(degrees) {
             const feed = document.getElementById('video-feed');
             if (!feed) return;
@@ -840,16 +963,25 @@
         }
 
         async function startListening() {
+            if (listenSocket && (listenSocket.readyState === WebSocket.OPEN || listenSocket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
             try {
                 await initAudioContext();
                 isListening = true;
+                if (listenReconnectTimer) {
+                    clearTimeout(listenReconnectTimer);
+                    listenReconnectTimer = null;
+                }
                 nextListenPlayTime = audioContext.currentTime;
                 updateUIStatus('listen', true);
                 debug('Starting remote audio stream over WebSocket...');
 
-                listenSocket = await createListenSocket();
+                const socket = await createListenSocket();
+                listenSocket = socket;
                 debug('Audio WebSocket connected');
-                listenSocket.addEventListener('message', (event) => {
+                socket.addEventListener('message', (event) => {
                     if (!isListening || !(event.data instanceof ArrayBuffer)) {
                         return;
                     }
@@ -861,22 +993,46 @@
                     const int16Array = new Int16Array(event.data, 0, sampleCount);
                     playAudioChunk(int16Array);
                 });
-                listenSocket.addEventListener('close', () => {
+                socket.addEventListener('close', () => {
                     if (!isListening) {
                         return;
                     }
-                    debug('Remote audio stream ended');
-                    stopListening();
+                    if (listenSocket === socket) {
+                        listenSocket = null;
+                    }
+                    debug('Remote audio stream ended, reconnecting...');
+                    if (listenReconnectTimer) {
+                        clearTimeout(listenReconnectTimer);
+                    }
+                    listenReconnectTimer = setTimeout(() => {
+                        if (isListening) {
+                            startListening();
+                        }
+                    }, 800);
                 });
             } catch (error) {
                 debug(`Listen error: ${error.message}`);
-                isListening = false;
-                updateUIStatus('listen', false);
+                if (isListening) {
+                    if (listenReconnectTimer) {
+                        clearTimeout(listenReconnectTimer);
+                    }
+                    listenReconnectTimer = setTimeout(() => {
+                        if (isListening) {
+                            startListening();
+                        }
+                    }, 1200);
+                } else {
+                    updateUIStatus('listen', false);
+                }
             }
         }
 
         function stopListening() {
             isListening = false;
+            if (listenReconnectTimer) {
+                clearTimeout(listenReconnectTimer);
+                listenReconnectTimer = null;
+            }
             if (listenSocket) {
                 if (listenSocket.readyState === WebSocket.OPEN || listenSocket.readyState === WebSocket.CONNECTING) {
                     listenSocket.close();
@@ -916,8 +1072,17 @@
                 source.connect(listenGainNode || audioContext.destination);
 
                 const now = audioContext.currentTime;
-                if (nextListenPlayTime < now + 0.02) {
-                    nextListenPlayTime = now + 0.02;
+                if (nextListenPlayTime > now + LISTEN_MAX_BUFFER_SECONDS) {
+                    // Drop stale queued audio to recover from runaway latency.
+                    nextListenPlayTime = now + LISTEN_MIN_LEAD_SECONDS;
+                    droppedListenChunks += 1;
+                    if (droppedListenChunks % 20 === 0) {
+                        debug(`Dropped ${droppedListenChunks} stale listen chunks to reduce latency`);
+                    }
+                    return;
+                }
+                if (nextListenPlayTime < now + LISTEN_MIN_LEAD_SECONDS) {
+                    nextListenPlayTime = now + LISTEN_MIN_LEAD_SECONDS;
                 }
                 source.start(nextListenPlayTime);
                 nextListenPlayTime += audioBuffer.duration;
@@ -1139,6 +1304,7 @@
         });
 
         initializeSpeakerVolumeControl();
+        initializeServerAudioDeviceControls();
         initializeCameraRotationControl();
         startVideoStream();
         refreshSystemStatus();
