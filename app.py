@@ -29,6 +29,30 @@ app = Flask(__name__)
 CORS(app)
 sock = Sock(app)
 
+VIDEO_ALLOWED_RESOLUTIONS = [
+    (640, 480),
+    (1296, 972),
+    (1920, 1080),
+    (2592, 1944),
+]
+VIDEO_MIN_FPS = 1
+VIDEO_MAX_FPS = 60
+
+DEFAULT_CAMERA_WIDTH = int(os.environ.get('CAMERA_WIDTH', '1920'))
+DEFAULT_CAMERA_HEIGHT = int(os.environ.get('CAMERA_HEIGHT', '1080'))
+DEFAULT_CAMERA_FPS = int(os.environ.get('CAMERA_FPS', '25'))
+
+if (DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT) not in VIDEO_ALLOWED_RESOLUTIONS:
+    DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT = 1920, 1080
+DEFAULT_CAMERA_FPS = max(VIDEO_MIN_FPS, min(VIDEO_MAX_FPS, DEFAULT_CAMERA_FPS))
+
+camera_settings = {
+    'width': DEFAULT_CAMERA_WIDTH,
+    'height': DEFAULT_CAMERA_HEIGHT,
+    'fps': DEFAULT_CAMERA_FPS,
+}
+camera_proc_lock = threading.Lock()
+
 print("\n" + "="*60)
 print("Raspberry Pi Surveillance System - Starting")
 print("="*60 + "\n")
@@ -440,15 +464,15 @@ if start_pulse_process():
 else:
     print("⚠ Audio playback pipeline will retry on first write")
 
-def start_camera():
+def start_camera(width, height, fps):
     """Start rpicam-vid outputting MJPEG directly to stdout"""
     try:
-        print("Starting camera pipeline (rpicam-vid mjpeg)...")
+        print(f"Starting camera pipeline (rpicam-vid mjpeg, {width}x{height} @ {fps}fps)...")
         proc = subprocess.Popen(
             [
                 'rpicam-vid', '-o', '-', '-t', '0',
-                '--width', '1920', '--height', '1080',
-                '--framerate', '25', '--codec', 'mjpeg'
+                '--width', str(width), '--height', str(height),
+                '--framerate', str(fps), '--codec', 'mjpeg'
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -459,6 +483,72 @@ def start_camera():
     except Exception as e:
         print(f"✗ Camera failed: {e}\n")
         return None
+
+def _normalize_camera_settings(width, height, fps):
+    try:
+        w = int(width)
+        h = int(height)
+        frames = int(fps)
+    except (TypeError, ValueError):
+        return None, 'width, height and fps must be integers'
+
+    if (w, h) not in VIDEO_ALLOWED_RESOLUTIONS:
+        choices = ', '.join(f'{rw}x{rh}' for rw, rh in VIDEO_ALLOWED_RESOLUTIONS)
+        return None, f'Unsupported resolution {w}x{h}. Allowed: {choices}'
+
+    if frames < VIDEO_MIN_FPS or frames > VIDEO_MAX_FPS:
+        return None, f'fps must be between {VIDEO_MIN_FPS} and {VIDEO_MAX_FPS}'
+
+    return {'width': w, 'height': h, 'fps': frames}, None
+
+def restart_camera_process(new_settings):
+    """Restart camera process with new settings."""
+    global camera_proc
+
+    with camera_proc_lock:
+        previous_settings = dict(camera_settings)
+
+        if camera_proc is not None:
+            try:
+                camera_proc.terminate()
+                camera_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    camera_proc.kill()
+                    camera_proc.wait(timeout=1)
+                except Exception:
+                    pass
+            camera_proc = None
+
+        camera_settings.update(new_settings)
+        new_proc = start_camera(
+            camera_settings['width'],
+            camera_settings['height'],
+            camera_settings['fps']
+        )
+
+        if new_proc is None:
+            camera_settings.update(previous_settings)
+            return False
+
+        camera_proc = new_proc
+
+    return True
+
+def ensure_camera_process_running():
+    """Ensure camera process exists and is alive."""
+    global camera_proc
+
+    with camera_proc_lock:
+        if camera_proc is not None and camera_proc.poll() is None and camera_proc.stdout is not None:
+            return True
+        print('⚙ Camera process not running, restarting...')
+        camera_proc = start_camera(
+            camera_settings['width'],
+            camera_settings['height'],
+            camera_settings['fps']
+        )
+        return camera_proc is not None
 
 def start_audio():
     """Start audio recording from selected microphone device."""
@@ -492,7 +582,11 @@ def start_audio():
         return None
 
 # Start processes
-camera_proc = start_camera()
+camera_proc = start_camera(
+    camera_settings['width'],
+    camera_settings['height'],
+    camera_settings['fps']
+)
 audio_proc = start_audio()
 
 @app.route('/')
@@ -506,13 +600,16 @@ def index():
         talkback_noise_suppression=TALKBACK_NOISE_SUPPRESSION,
         talkback_auto_gain_control=TALKBACK_AUTO_GAIN_CONTROL,
         talkback_latency_seconds=TALKBACK_LATENCY_SECONDS,
+        camera_width=camera_settings['width'],
+        camera_height=camera_settings['height'],
+        camera_fps=camera_settings['fps'],
     )
 
 @sock.route('/video_feed')
 def video_feed_socket(ws):
     """Stream JPEG frames over WebSocket from camera stdout."""
     global camera_proc
-    if not camera_proc or camera_proc.poll() is not None:
+    if not ensure_camera_process_running():
         print('📹 Video socket: camera not available')
         return
 
@@ -520,7 +617,20 @@ def video_feed_socket(ws):
     buffer = b''
     try:
         while True:
-            chunk = camera_proc.stdout.read(4096)
+            proc = camera_proc
+            if proc is None or proc.poll() is not None or proc.stdout is None:
+                if not ensure_camera_process_running():
+                    print('📹 Video socket: camera unavailable after restart attempt')
+                    break
+                time.sleep(0.02)
+                continue
+
+            try:
+                chunk = proc.stdout.read(4096)
+            except (OSError, ValueError) as read_error:
+                print(f'📹 Video socket: camera stream read interrupted ({read_error}), retrying...')
+                time.sleep(0.02)
+                continue
             if not chunk:
                 time.sleep(0.01)
                 continue
@@ -693,6 +803,57 @@ def set_speaker_volume():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/camera_settings', methods=['GET'])
+def get_camera_settings():
+    allowed = [
+        {'width': width, 'height': height}
+        for width, height in VIDEO_ALLOWED_RESOLUTIONS
+    ]
+    return jsonify({
+        'status': 'ok',
+        'width': camera_settings['width'],
+        'height': camera_settings['height'],
+        'fps': camera_settings['fps'],
+        'allowed_resolutions': allowed,
+        'fps_range': {
+            'min': VIDEO_MIN_FPS,
+            'max': VIDEO_MAX_FPS
+        }
+    })
+
+@app.route('/camera_settings', methods=['POST'])
+def set_camera_settings():
+    payload = request.get_json(silent=True) or {}
+    normalized, error = _normalize_camera_settings(
+        payload.get('width'),
+        payload.get('height'),
+        payload.get('fps')
+    )
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+
+    if normalized == camera_settings:
+        return jsonify({
+            'status': 'ok',
+            'width': camera_settings['width'],
+            'height': camera_settings['height'],
+            'fps': camera_settings['fps'],
+            'message': 'Camera settings unchanged'
+        })
+
+    if not restart_camera_process(normalized):
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to restart camera process with the requested settings'
+        }), 500
+
+    return jsonify({
+        'status': 'ok',
+        'width': camera_settings['width'],
+        'height': camera_settings['height'],
+        'fps': camera_settings['fps']
+    })
+
 @app.route('/status')
 def status():
     speaker_volume, speaker_control = _get_speaker_volume_percent()
@@ -700,6 +861,9 @@ def status():
         'camera': camera_proc is not None and camera_proc.poll() is None,
         'audio': audio_proc is not None and audio_proc.poll() is None,
         'queue_size': 0,
+        'camera_width': camera_settings['width'],
+        'camera_height': camera_settings['height'],
+        'camera_fps': camera_settings['fps'],
         'audio_player_nice': AUDIO_PLAYER_NICE,
         'speaker_volume': speaker_volume,
         'speaker_control': speaker_control

@@ -391,6 +391,9 @@
         data-talkback-noise-suppression="{{ talkback_noise_suppression | lower }}"
         data-talkback-auto-gain-control="{{ talkback_auto_gain_control | lower }}"
         data-talkback-latency-seconds="{{ talkback_latency_seconds }}"
+        data-camera-width="{{ camera_width }}"
+        data-camera-height="{{ camera_height }}"
+        data-camera-fps="{{ camera_fps }}"
     >
         <h1>🎥 Raspberry Pi Surveillance System</h1>
 
@@ -405,6 +408,25 @@
                         <option value="180">180°</option>
                         <option value="270">270°</option>
                     </select>
+                </div>
+                <div class="video-tools">
+                    <label for="camera-resolution">📷 Camera Stream</label>
+                    <select id="camera-resolution" class="rotation-select"></select>
+                    <label for="camera-fps" style="margin-top:10px; display:block;">FPS</label>
+                    <input
+                        id="camera-fps"
+                        class="rotation-select"
+                        type="number"
+                        min="1"
+                        max="60"
+                        step="1"
+                        value="25"
+                        style="margin-top:4px;"
+                    >
+                    <button id="apply-camera-settings-btn" class="btn-primary" style="margin-top:10px; min-width:0; width:100%;">
+                        Apply Camera Settings
+                    </button>
+                    <p class="volume-text" id="camera-settings-status">Loading camera settings...</p>
                 </div>
                 <div class="video-tools">
                     <label for="server-mic-select">🎤 Server Microphone</label>
@@ -474,7 +496,7 @@
                 <div class="control-group">
                     <h3>ℹ️ System Info</h3>
                     <div class="info-box">
-                        <p><strong>Video:</strong> 1920x1080 @ 25fps</p>
+                        <p id="video-info"><strong>Video:</strong> {{ camera_width }}x{{ camera_height }} @ {{ camera_fps }}fps</p>
                         <p><strong>Audio:</strong> 48000Hz Mono</p>
                         <p id="audio-player-nice"><strong>Audio Player Nice:</strong> --</p>
                         <p id="system-status"><strong>Status:</strong> Running ✓</p>
@@ -502,6 +524,10 @@
         let talkMeterSmooth = 0;
         let videoSocket = null;
         let videoFrameUrl = null;
+        let videoReconnectTimer = null;
+        let videoReconnectAttempt = 0;
+        let videoExpectedClose = false;
+        let videoSettingsApplyInProgress = false;
         let listenSocket = null;
         let listenReconnectTimer = null;
         let talkSocket = null;
@@ -512,10 +538,23 @@
         let serverSpeakerOptions = [];
         let selectedServerMic = 'default';
         let selectedServerSpeaker = '@DEFAULT_SINK@';
+        const appContainer = document.querySelector('.container');
+        let cameraSettings = {
+            width: Number(appContainer?.dataset.cameraWidth || 1920),
+            height: Number(appContainer?.dataset.cameraHeight || 1080),
+            fps: Number(appContainer?.dataset.cameraFps || 25),
+            fpsMin: 1,
+            fpsMax: 60,
+            allowedResolutions: [
+                { width: 640, height: 480 },
+                { width: 1296, height: 972 },
+                { width: 1920, height: 1080 },
+                { width: 2592, height: 1944 }
+            ]
+        };
         const ROTATION_STORAGE_KEY = 'cameraRotationDegrees';
         const LISTEN_MIN_LEAD_SECONDS = 0.02;
         const LISTEN_MAX_BUFFER_SECONDS = 0.4;
-        const appContainer = document.querySelector('.container');
         const TALKBACK_CONFIG = {
             highPassHz: Number(appContainer?.dataset.talkbackHighpassHz || 100),
             lowPassHz: Number(appContainer?.dataset.talkbackLowpassHz || 5000),
@@ -612,6 +651,19 @@
             return socket;
         }
 
+        function scheduleVideoReconnect() {
+            if (videoReconnectTimer || document.hidden) {
+                return;
+            }
+
+            videoReconnectAttempt += 1;
+            const delay = Math.min(3000, 600 + (videoReconnectAttempt - 1) * 400);
+            videoReconnectTimer = setTimeout(() => {
+                videoReconnectTimer = null;
+                startVideoStream();
+            }, delay);
+        }
+
         function startVideoStream() {
             const feed = document.getElementById('video-feed');
             if (!feed) return;
@@ -620,9 +672,18 @@
                 return;
             }
 
+            if (videoReconnectTimer) {
+                clearTimeout(videoReconnectTimer);
+                videoReconnectTimer = null;
+            }
+
+            videoExpectedClose = false;
+
             videoSocket = openBinarySocket('/video_feed', 'blob');
 
             videoSocket.addEventListener('open', () => {
+                videoReconnectAttempt = 0;
+                videoSettingsApplyInProgress = false;
                 debug('Video WebSocket connected');
             });
 
@@ -641,24 +702,46 @@
             });
 
             videoSocket.addEventListener('close', () => {
-                debug('Video WebSocket disconnected');
+                if (videoExpectedClose || videoSettingsApplyInProgress) {
+                    debug('Video WebSocket reconnecting...');
+                } else {
+                    debug('Video WebSocket disconnected');
+                }
                 videoSocket = null;
-                setTimeout(() => {
-                    if (!document.hidden) {
-                        startVideoStream();
-                    }
-                }, 1200);
+                if (!videoExpectedClose) {
+                    scheduleVideoReconnect();
+                }
             });
 
             videoSocket.addEventListener('error', () => {
-                debug('Video WebSocket error');
+                const transient =
+                    videoExpectedClose ||
+                    videoSettingsApplyInProgress ||
+                    !videoSocket ||
+                    videoSocket.readyState !== WebSocket.OPEN;
+
+                if (transient) {
+                    debug('Video WebSocket reconnecting...');
+                } else {
+                    debug('Video WebSocket error');
+                }
             });
         }
 
-        function stopVideoStream() {
+        function stopVideoStream(options = {}) {
+            const { intentional = true } = options;
+
+            if (videoReconnectTimer) {
+                clearTimeout(videoReconnectTimer);
+                videoReconnectTimer = null;
+            }
+
             if (videoSocket) {
+                videoExpectedClose = intentional;
                 videoSocket.close();
                 videoSocket = null;
+            } else {
+                videoExpectedClose = false;
             }
             if (videoFrameUrl) {
                 URL.revokeObjectURL(videoFrameUrl);
@@ -782,6 +865,156 @@
             });
 
             fetchSpeakerVolume();
+        }
+
+        function updateVideoInfo(width, height, fps) {
+            const videoInfo = document.getElementById('video-info');
+            if (!videoInfo) return;
+            videoInfo.innerHTML = `<strong>Video:</strong> ${width}x${height} @ ${fps}fps`;
+        }
+
+        function populateResolutionSelect(options, selectedWidth, selectedHeight) {
+            const resolutionSelect = document.getElementById('camera-resolution');
+            if (!resolutionSelect) return;
+
+            resolutionSelect.innerHTML = '';
+            options.forEach((item) => {
+                const option = document.createElement('option');
+                option.value = `${item.width}x${item.height}`;
+                option.textContent = `${item.width}x${item.height}`;
+                resolutionSelect.appendChild(option);
+            });
+
+            const selectedValue = `${selectedWidth}x${selectedHeight}`;
+            const hasValue = options.some((item) => `${item.width}x${item.height}` === selectedValue);
+            if (hasValue) {
+                resolutionSelect.value = selectedValue;
+            }
+        }
+
+        async function loadCameraSettings() {
+            const status = document.getElementById('camera-settings-status');
+            const fpsInput = document.getElementById('camera-fps');
+
+            try {
+                const response = await fetch('/camera_settings');
+                const data = await response.json();
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+
+                cameraSettings.width = Number(data.width);
+                cameraSettings.height = Number(data.height);
+                cameraSettings.fps = Number(data.fps);
+                cameraSettings.allowedResolutions = Array.isArray(data.allowed_resolutions)
+                    ? data.allowed_resolutions
+                    : cameraSettings.allowedResolutions;
+                cameraSettings.fpsMin = Number(data.fps_range?.min || 1);
+                cameraSettings.fpsMax = Number(data.fps_range?.max || 60);
+
+                populateResolutionSelect(
+                    cameraSettings.allowedResolutions,
+                    cameraSettings.width,
+                    cameraSettings.height
+                );
+
+                if (fpsInput) {
+                    fpsInput.min = String(cameraSettings.fpsMin);
+                    fpsInput.max = String(cameraSettings.fpsMax);
+                    fpsInput.value = String(cameraSettings.fps);
+                }
+
+                updateVideoInfo(cameraSettings.width, cameraSettings.height, cameraSettings.fps);
+                if (status) {
+                    status.textContent = 'Camera settings loaded';
+                }
+            } catch (error) {
+                if (status) {
+                    status.textContent = `Failed to load camera settings: ${error.message}`;
+                }
+            }
+        }
+
+        async function applyCameraSettings() {
+            const resolutionSelect = document.getElementById('camera-resolution');
+            const fpsInput = document.getElementById('camera-fps');
+            const status = document.getElementById('camera-settings-status');
+            const applyBtn = document.getElementById('apply-camera-settings-btn');
+
+            if (!resolutionSelect || !fpsInput || !applyBtn) {
+                return;
+            }
+
+            const [widthText, heightText] = (resolutionSelect.value || '').split('x');
+            const width = Number(widthText);
+            const height = Number(heightText);
+            const fps = Number(fpsInput.value);
+
+            applyBtn.disabled = true;
+            videoSettingsApplyInProgress = true;
+            if (status) {
+                status.textContent = 'Applying camera settings...';
+            }
+
+            try {
+                const response = await fetch('/camera_settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ width, height, fps })
+                });
+                const data = await response.json();
+                if (!response.ok || data.status !== 'ok') {
+                    throw new Error(data.message || `HTTP ${response.status}`);
+                }
+
+                cameraSettings.width = Number(data.width);
+                cameraSettings.height = Number(data.height);
+                cameraSettings.fps = Number(data.fps);
+                updateVideoInfo(cameraSettings.width, cameraSettings.height, cameraSettings.fps);
+
+                if (status) {
+                    status.textContent = `Camera set to ${cameraSettings.width}x${cameraSettings.height} @ ${cameraSettings.fps}fps`;
+                }
+
+                // Keep the current socket alive; backend stream handling will recover during camera restart.
+                if (!videoSocket || videoSocket.readyState === WebSocket.CLOSED) {
+                    startVideoStream();
+                }
+            } catch (error) {
+                videoSettingsApplyInProgress = false;
+                if (status) {
+                    status.textContent = `Failed to apply camera settings: ${error.message}`;
+                }
+            } finally {
+                applyBtn.disabled = false;
+                if (videoSettingsApplyInProgress) {
+                    setTimeout(() => {
+                        videoSettingsApplyInProgress = false;
+                    }, 2500);
+                }
+            }
+        }
+
+        function initializeCameraSettingsControl() {
+            const applyBtn = document.getElementById('apply-camera-settings-btn');
+            const fpsInput = document.getElementById('camera-fps');
+
+            if (applyBtn) {
+                applyBtn.addEventListener('click', () => {
+                    applyCameraSettings();
+                });
+            }
+
+            if (fpsInput) {
+                fpsInput.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        applyCameraSettings();
+                    }
+                });
+            }
+
+            loadCameraSettings();
         }
 
         function populateServerDeviceSelect(selectId, options, selectedId) {
@@ -935,6 +1168,10 @@
                         ? data.audio_player_nice
                         : '--';
                     niceEl.innerHTML = `<strong>Audio Player Nice:</strong> ${niceValue}`;
+                }
+
+                if (Number.isFinite(data.camera_width) && Number.isFinite(data.camera_height) && Number.isFinite(data.camera_fps)) {
+                    updateVideoInfo(data.camera_width, data.camera_height, data.camera_fps);
                 }
 
                 if (statusEl) {
@@ -1303,9 +1540,18 @@
             stopTalking();
         });
 
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopVideoStream({ intentional: true });
+                return;
+            }
+            startVideoStream();
+        });
+
         initializeSpeakerVolumeControl();
         initializeServerAudioDeviceControls();
         initializeCameraRotationControl();
+        initializeCameraSettingsControl();
         startVideoStream();
         refreshSystemStatus();
         setInterval(refreshSystemStatus, 5000);
