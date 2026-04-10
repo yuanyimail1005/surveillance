@@ -72,12 +72,18 @@ TALKBACK_ECHO_CANCELLATION = True
 TALKBACK_NOISE_SUPPRESSION = True
 TALKBACK_AUTO_GAIN_CONTROL = False
 TALKBACK_LATENCY_SECONDS = 0.02
+PULSE_ECHO_CANCEL_ENABLED = os.environ.get('PULSE_ECHO_CANCEL_ENABLED', 'true').lower() != 'false'
+PULSE_ECHO_CANCEL_AEC_METHOD = os.environ.get('PULSE_ECHO_CANCEL_AEC_METHOD', 'webrtc')
+PULSE_ECHO_CANCEL_SOURCE_NAME = os.environ.get('PULSE_ECHO_CANCEL_SOURCE_NAME', 'surveillance_ec_source')
+PULSE_ECHO_CANCEL_SINK_NAME = os.environ.get('PULSE_ECHO_CANCEL_SINK_NAME', 'surveillance_ec_sink')
+PULSE_CAPTURE_SOURCE = os.environ.get('PULSE_CAPTURE_SOURCE', '')
 try:
     TALKBACK_PLAYBACK_GAIN = float(os.environ.get('TALKBACK_PLAYBACK_GAIN', '5.0'))
 except ValueError:
     TALKBACK_PLAYBACK_GAIN = 5.0
 TALKBACK_PLAYBACK_GAIN = max(0.1, min(12.0, TALKBACK_PLAYBACK_GAIN))
 pulseaudio_started_by_app = False
+echo_cancel_module_id = None
 device_switch_lock = threading.Lock()
 audio_proc_lock = threading.Lock()
 
@@ -122,6 +128,85 @@ def _resolve_default_sink():
     except Exception:
         pass
     return None
+
+def _resolve_default_source():
+    """Return the actual PulseAudio source name currently set as the default, or None."""
+    try:
+        result = subprocess.run(['pactl', 'info'], capture_output=True, text=True)
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if line.startswith('Default Source:'):
+                return line.split(':', 1)[1].strip() or None
+    except Exception:
+        pass
+    return None
+
+def _setup_pulseaudio_echo_cancel():
+    """Create PulseAudio echo-cancel source/sink and route app audio through it."""
+    global echo_cancel_module_id, PULSE_CAPTURE_SOURCE, PULSE_SINK_NAME
+
+    if not PULSE_ECHO_CANCEL_ENABLED:
+        return False
+
+    if echo_cancel_module_id is not None:
+        return True
+
+    sink_master = _resolve_default_sink()
+    source_master = _resolve_default_source()
+    if not sink_master or not source_master:
+        print('⚠ PulseAudio echo cancel: default sink/source not available')
+        return False
+
+    cmd = [
+        'pactl',
+        'load-module',
+        'module-echo-cancel',
+        f'aec_method={PULSE_ECHO_CANCEL_AEC_METHOD}',
+        f'source_master={source_master}',
+        f'sink_master={sink_master}',
+        f'source_name={PULSE_ECHO_CANCEL_SOURCE_NAME}',
+        f'sink_name={PULSE_ECHO_CANCEL_SINK_NAME}',
+        f'source_properties=device.description=SurveillanceEchoCancelSource',
+        f'sink_properties=device.description=SurveillanceEchoCancelSink',
+        f'rate={SAMPLE_RATE}',
+        'channels=1'
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        print(f'⚠ PulseAudio echo cancel setup failed: {stderr or "unknown error"}')
+        return False
+
+    try:
+        echo_cancel_module_id = int((result.stdout or '').strip())
+    except ValueError:
+        echo_cancel_module_id = None
+
+    # Route app capture/playback through the echo-cancel virtual devices.
+    PULSE_CAPTURE_SOURCE = PULSE_ECHO_CANCEL_SOURCE_NAME
+    PULSE_SINK_NAME = PULSE_ECHO_CANCEL_SINK_NAME
+    print(
+        f'✓ PulseAudio echo cancel enabled '
+        f'(source={PULSE_CAPTURE_SOURCE}, sink={PULSE_SINK_NAME}, method={PULSE_ECHO_CANCEL_AEC_METHOD})'
+    )
+    return True
+
+def _teardown_pulseaudio_echo_cancel():
+    """Unload PulseAudio echo-cancel module if this app loaded it."""
+    global echo_cancel_module_id
+    if echo_cancel_module_id is None:
+        return
+
+    result = subprocess.run(
+        ['pactl', 'unload-module', str(echo_cancel_module_id)],
+        capture_output=True,
+        text=True
+    )
+    if result.returncode == 0:
+        print('✓ PulseAudio echo cancel disabled')
+    echo_cancel_module_id = None
 
 def list_output_sinks():
     """Return available PulseAudio sinks plus default."""
@@ -304,6 +389,9 @@ if microphone_card:
     print(f"✓ Microphone card detected: {microphone_card}")
 else:
     print("⚠ Microphone card not detected")
+
+if PULSE_ECHO_CANCEL_ENABLED:
+    _setup_pulseaudio_echo_cancel()
 
 print(f"Using microphone device: {MICROPHONE_DEVICE}")
 print(f"Using speaker sink: {PULSE_SINK_NAME}")
@@ -553,16 +641,30 @@ def ensure_camera_process_running():
 def start_audio():
     """Start audio recording from selected microphone device."""
     try:
-        print(f"Starting audio recording from microphone ({MICROPHONE_DEVICE})...")
-        proc = subprocess.Popen(
-            [
+        use_pulse_capture = bool(PULSE_CAPTURE_SOURCE)
+        if use_pulse_capture:
+            print(f"Starting audio recording from PulseAudio source ({PULSE_CAPTURE_SOURCE})...")
+            cmd = [
+                'parec',
+                '--device', PULSE_CAPTURE_SOURCE,
+                '--format=s16le',
+                '--rate', str(SAMPLE_RATE),
+                '--channels', str(MIC_CHANNELS),
+                '--raw'
+            ]
+        else:
+            print(f"Starting audio recording from microphone ({MICROPHONE_DEVICE})...")
+            cmd = [
                 'arecord',
                 '-D', MICROPHONE_DEVICE,
                 '-f', 'S16_LE',
                 '-r', str(SAMPLE_RATE),
                 '-c', str(MIC_CHANNELS),
                 '-'
-            ],
+            ]
+
+        proc = subprocess.Popen(
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=4096
@@ -572,10 +674,35 @@ def start_audio():
         time.sleep(0.2)
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode('utf-8', errors='ignore')
+            if use_pulse_capture:
+                print(f"⚠ PulseAudio capture process died: {stderr}\n")
+                print("⚙ Falling back to direct ALSA capture via arecord")
+                fallback = subprocess.Popen(
+                    [
+                        'arecord',
+                        '-D', MICROPHONE_DEVICE,
+                        '-f', 'S16_LE',
+                        '-r', str(SAMPLE_RATE),
+                        '-c', str(MIC_CHANNELS),
+                        '-'
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=4096
+                )
+                time.sleep(0.2)
+                if fallback.poll() is not None:
+                    fb_stderr = fallback.stderr.read().decode('utf-8', errors='ignore')
+                    print(f"⚠ ALSA fallback also failed: {fb_stderr}\n")
+                    return None
+                print(f"✓ Audio recording started via ALSA fallback (Mono, {SAMPLE_RATE}Hz)\n")
+                return fallback
+
             print(f"⚠ Audio process died: {stderr}\n")
             return None
 
-        print(f"✓ Audio recording started (Mono, {SAMPLE_RATE}Hz)\n")
+        mode = 'PulseAudio echo-cancel source' if use_pulse_capture else 'ALSA capture'
+        print(f"✓ Audio recording started ({mode}, Mono, {SAMPLE_RATE}Hz)\n")
         return proc
     except Exception as e:
         print(f"⚠ Audio failed: {e}\n")
@@ -968,6 +1095,7 @@ if __name__ == '__main__':
         print("\nShutting down...")
     finally:
         stop_pulse_pipeline()
+        _teardown_pulseaudio_echo_cancel()
         stop_pulseaudio_daemon_if_started_by_app()
         if camera_proc:
             camera_proc.terminate()
