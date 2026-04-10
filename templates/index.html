@@ -307,6 +307,17 @@
             cursor: pointer;
         }
 
+        .recording-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .recording-controls button {
+            min-width: 0;
+            width: 100%;
+        }
+
         @media (max-width: 992px) {
             body {
                 overflow: auto;
@@ -432,6 +443,11 @@
                         Apply Camera Settings
                     </button>
                     <p class="volume-text" id="camera-settings-status">Loading camera settings...</p>
+                    <div class="recording-controls">
+                        <button id="record-video-btn" class="btn-primary" type="button">● Start Recording</button>
+                        <button id="choose-save-folder-btn" class="btn-primary" type="button" style="max-width:190px;">Choose Save Folder</button>
+                    </div>
+                    <p class="volume-text" id="recording-status">Ready to record</p>
                 </div>
                 <div class="video-tools">
                     <div style="display:flex; gap:12px; align-items:flex-end;">
@@ -509,7 +525,6 @@
                     <div class="info-box">
                         <p id="video-info"><strong>Video:</strong> {{ camera_width }}x{{ camera_height }} @ {{ camera_fps }}fps</p>
                         <p><strong>Audio:</strong> 48000Hz Mono</p>
-                        <p id="audio-player-nice"><strong>Audio Player Nice:</strong> --</p>
                         <p id="system-status"><strong>Status:</strong> Running ✓</p>
                     </div>
                 </div>
@@ -539,6 +554,15 @@
         let videoReconnectAttempt = 0;
         let videoExpectedClose = false;
         let videoSettingsApplyInProgress = false;
+        let isRecordingVideo = false;
+        let recordingCanvas = null;
+        let recordingContext = null;
+        let recordingAnimationFrame = null;
+        let recordingCanvasStream = null;
+        let recordingMediaRecorder = null;
+        let recordingChunks = [];
+        let recordingMimeType = '';
+        let recordingDirectoryHandle = null;
         let listenSocket = null;
         let listenReconnectTimer = null;
         let talkSocket = null;
@@ -566,6 +590,7 @@
         const ROTATION_STORAGE_KEY = 'cameraRotationDegrees';
         const LISTEN_MIN_LEAD_SECONDS = 0.02;
         const LISTEN_MAX_BUFFER_SECONDS = 0.4;
+        const MAX_LOCAL_RECORDINGS_BYTES = 1024 * 1024 * 1024;
         const TALKBACK_CONFIG = {
             highPassHz: Number(appContainer?.dataset.talkbackHighpassHz || 100),
             lowPassHz: Number(appContainer?.dataset.talkbackLowpassHz || 5000),
@@ -878,6 +903,339 @@
             fetchSpeakerVolume();
         }
 
+        function getSupportedRecordingMimeType() {
+            const candidates = [
+                'video/webm;codecs=vp9',
+                'video/webm;codecs=vp8',
+                'video/webm'
+            ];
+
+            for (const candidate of candidates) {
+                if (window.MediaRecorder && MediaRecorder.isTypeSupported(candidate)) {
+                    return candidate;
+                }
+            }
+            return '';
+        }
+
+        function setRecordingStatus(text) {
+            const status = document.getElementById('recording-status');
+            if (status) {
+                status.textContent = text;
+            }
+        }
+
+        function updateRecordingButton() {
+            const btn = document.getElementById('record-video-btn');
+            if (!btn) return;
+
+            btn.className = isRecordingVideo ? 'btn-danger' : 'btn-primary';
+            btn.textContent = isRecordingVideo ? '■ Stop Recording' : '● Start Recording';
+        }
+
+        function formatBytes(bytes) {
+            const mb = bytes / (1024 * 1024);
+            if (mb < 1024) {
+                return `${mb.toFixed(1)} MB`;
+            }
+            return `${(mb / 1024).toFixed(2)} GB`;
+        }
+
+        function buildRecordingFilename() {
+            const now = new Date();
+            const yyyy = now.getFullYear();
+            const mm = String(now.getMonth() + 1).padStart(2, '0');
+            const dd = String(now.getDate()).padStart(2, '0');
+            const hh = String(now.getHours()).padStart(2, '0');
+            const mi = String(now.getMinutes()).padStart(2, '0');
+            const ss = String(now.getSeconds()).padStart(2, '0');
+            return `recording_${yyyy}${mm}${dd}_${hh}${mi}${ss}.webm`;
+        }
+
+        async function ensureDirectoryPermission(handle) {
+            const permissionMode = { mode: 'readwrite' };
+            if ((await handle.queryPermission(permissionMode)) === 'granted') {
+                return true;
+            }
+            if ((await handle.requestPermission(permissionMode)) === 'granted') {
+                return true;
+            }
+            return false;
+        }
+
+        async function ensureClientRecordingDirectory(forcePick = false) {
+            if (!window.showDirectoryPicker || !window.isSecureContext) {
+                return null;
+            }
+
+            if (!forcePick && recordingDirectoryHandle) {
+                const granted = await ensureDirectoryPermission(recordingDirectoryHandle);
+                if (granted) {
+                    return recordingDirectoryHandle;
+                }
+            }
+
+            let baseDir;
+            try {
+                baseDir = await window.showDirectoryPicker({
+                    mode: 'readwrite',
+                    startIn: 'downloads'
+                });
+            } catch (error) {
+                // Some browsers support showDirectoryPicker but reject the startIn option.
+                if (error instanceof TypeError) {
+                    baseDir = await window.showDirectoryPicker({ mode: 'readwrite' });
+                } else {
+                    throw error;
+                }
+            }
+            const granted = await ensureDirectoryPermission(baseDir);
+            if (!granted) {
+                throw new Error('Permission denied for selected folder');
+            }
+            recordingDirectoryHandle = baseDir;
+            return baseDir;
+        }
+
+        async function enforceLocalRecordingCap(dirHandle, maxBytes) {
+            const files = [];
+            let totalBytes = 0;
+
+            for await (const [name, handle] of dirHandle.entries()) {
+                if (handle.kind !== 'file' || !name.toLowerCase().endsWith('.webm')) {
+                    continue;
+                }
+                const file = await handle.getFile();
+                totalBytes += file.size;
+                files.push({
+                    name,
+                    size: file.size,
+                    lastModified: file.lastModified
+                });
+            }
+
+            files.sort((a, b) => a.lastModified - b.lastModified);
+
+            let deletedBytes = 0;
+            while (totalBytes > maxBytes && files.length > 0) {
+                const oldest = files.shift();
+                await dirHandle.removeEntry(oldest.name);
+                totalBytes -= oldest.size;
+                deletedBytes += oldest.size;
+            }
+
+            return { totalBytes, deletedBytes };
+        }
+
+        async function saveRecordingBlobLocally(blob) {
+            const filename = buildRecordingFilename();
+            const dirHandle = await ensureClientRecordingDirectory();
+
+            if (dirHandle) {
+                const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+
+                const retention = await enforceLocalRecordingCap(dirHandle, MAX_LOCAL_RECORDINGS_BYTES);
+                return {
+                    path: filename,
+                    bytes: blob.size,
+                    retainedBytes: retention.totalBytes,
+                    deletedBytes: retention.deletedBytes,
+                    usedFallback: false
+                };
+            }
+
+            const fallbackName = filename;
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = fallbackName;
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+
+            return {
+                path: fallbackName,
+                bytes: blob.size,
+                retainedBytes: blob.size,
+                deletedBytes: 0,
+                usedFallback: true
+            };
+        }
+
+        function renderRecordingFrame() {
+            if (!isRecordingVideo || !recordingContext || !recordingCanvas) {
+                return;
+            }
+
+            const feed = document.getElementById('video-feed');
+            if (feed && feed.naturalWidth > 0 && feed.naturalHeight > 0) {
+                recordingContext.drawImage(feed, 0, 0, recordingCanvas.width, recordingCanvas.height);
+            }
+            recordingAnimationFrame = requestAnimationFrame(renderRecordingFrame);
+        }
+
+        function stopRecordingRenderLoop() {
+            if (recordingAnimationFrame) {
+                cancelAnimationFrame(recordingAnimationFrame);
+                recordingAnimationFrame = null;
+            }
+        }
+
+        function cleanupRecordingResources() {
+            stopRecordingRenderLoop();
+            if (recordingCanvasStream) {
+                recordingCanvasStream.getTracks().forEach((track) => track.stop());
+            }
+            recordingCanvasStream = null;
+            recordingMediaRecorder = null;
+            recordingCanvas = null;
+            recordingContext = null;
+        }
+
+        async function startVideoRecording() {
+            if (isRecordingVideo) return;
+
+            const feed = document.getElementById('video-feed');
+            if (!feed) return;
+
+            if (!window.MediaRecorder) {
+                setRecordingStatus('Recording unavailable: MediaRecorder is not supported');
+                return;
+            }
+
+            recordingMimeType = getSupportedRecordingMimeType();
+            if (!recordingMimeType) {
+                setRecordingStatus('Recording unavailable: no supported WebM codec');
+                return;
+            }
+
+            try {
+                setRecordingStatus('Starting recording...');
+                const width = Math.max(1, Number(cameraSettings.width || feed.naturalWidth || 1280));
+                const height = Math.max(1, Number(cameraSettings.height || feed.naturalHeight || 720));
+                const fps = Math.max(1, Math.min(30, Number(cameraSettings.fps || 20)));
+
+                recordingCanvas = document.createElement('canvas');
+                recordingCanvas.width = width;
+                recordingCanvas.height = height;
+                recordingContext = recordingCanvas.getContext('2d', { alpha: false });
+
+                recordingCanvasStream = recordingCanvas.captureStream(fps);
+                recordingMediaRecorder = new MediaRecorder(recordingCanvasStream, {
+                    mimeType: recordingMimeType,
+                    videoBitsPerSecond: 4_000_000
+                });
+
+                recordingChunks = [];
+                recordingMediaRecorder.addEventListener('dataavailable', (event) => {
+                    if (!event.data || event.data.size === 0) {
+                        return;
+                    }
+                    recordingChunks.push(event.data);
+                });
+
+                recordingMediaRecorder.addEventListener('error', (event) => {
+                    const err = event.error?.message || 'MediaRecorder error';
+                    setRecordingStatus(`Recording error: ${err}`);
+                });
+
+                isRecordingVideo = true;
+                updateRecordingButton();
+                renderRecordingFrame();
+                recordingMediaRecorder.start(1000);
+                setRecordingStatus('Recording on this client...');
+            } catch (error) {
+                isRecordingVideo = false;
+                updateRecordingButton();
+                cleanupRecordingResources();
+                recordingChunks = [];
+                setRecordingStatus(`Failed to start recording: ${error.message}`);
+            }
+        }
+
+        async function stopVideoRecording() {
+            if (!isRecordingVideo) return;
+
+            isRecordingVideo = false;
+            updateRecordingButton();
+            setRecordingStatus('Stopping recording...');
+
+            const recorder = recordingMediaRecorder;
+
+            try {
+                if (recorder && recorder.state !== 'inactive') {
+                    await new Promise((resolve) => {
+                        recorder.addEventListener('stop', resolve, { once: true });
+                        recorder.stop();
+                    });
+                }
+
+                const blob = new Blob(recordingChunks, { type: recordingMimeType || 'video/webm' });
+                recordingChunks = [];
+                if (blob.size === 0) {
+                    setRecordingStatus('No video data captured');
+                    return;
+                }
+
+                const result = await saveRecordingBlobLocally(blob);
+                const details = `Saved ${formatBytes(result.bytes)} to ${result.path}. Total kept: ${formatBytes(result.retainedBytes)} / 1.00 GB`;
+                if (result.usedFallback) {
+                    setRecordingStatus(`${details} (download fallback used)`);
+                } else {
+                    setRecordingStatus(details);
+                }
+            } catch (error) {
+                setRecordingStatus(`Failed to finalize recording: ${error.message}`);
+            } finally {
+                cleanupRecordingResources();
+                recordingChunks = [];
+            }
+        }
+
+        function initializeVideoRecordingControl() {
+            const button = document.getElementById('record-video-btn');
+            const chooseFolderBtn = document.getElementById('choose-save-folder-btn');
+            if (!button) return;
+
+            updateRecordingButton();
+            button.addEventListener('click', async () => {
+                button.disabled = true;
+                try {
+                    if (isRecordingVideo) {
+                        await stopVideoRecording();
+                    } else {
+                        await startVideoRecording();
+                    }
+                } finally {
+                    button.disabled = false;
+                }
+            });
+
+            if (chooseFolderBtn) {
+                chooseFolderBtn.addEventListener('click', async () => {
+                    chooseFolderBtn.disabled = true;
+                    setRecordingStatus('Opening folder picker...');
+                    try {
+                        const dirHandle = await ensureClientRecordingDirectory(true);
+                        if (dirHandle) {
+                            setRecordingStatus('Save folder ready: selected folder');
+                        } else {
+                            setRecordingStatus('Folder picker unavailable; browser download fallback will be used');
+                        }
+                    } catch (error) {
+                        setRecordingStatus(`Save folder selection failed: ${error.message}`);
+                    } finally {
+                        chooseFolderBtn.disabled = false;
+                    }
+                });
+            }
+        }
+
         function updateVideoRatio(width, height) {
             const ratio = `${width} / ${height}`;
             const container = document.querySelector('.container');
@@ -1178,20 +1536,12 @@
 
         async function refreshSystemStatus() {
             const statusEl = document.getElementById('system-status');
-            const niceEl = document.getElementById('audio-player-nice');
 
             try {
                 const response = await fetch('/status');
                 const data = await response.json();
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
-                }
-
-                if (niceEl) {
-                    const niceValue = Number.isFinite(data.audio_player_nice)
-                        ? data.audio_player_nice
-                        : '--';
-                    niceEl.innerHTML = `<strong>Audio Player Nice:</strong> ${niceValue}`;
                 }
 
                 if (Number.isFinite(data.camera_width) && Number.isFinite(data.camera_height) && Number.isFinite(data.camera_fps)) {
@@ -1207,9 +1557,6 @@
             } catch (error) {
                 if (statusEl) {
                     statusEl.innerHTML = '<strong>Status:</strong> Offline ✗';
-                }
-                if (niceEl) {
-                    niceEl.innerHTML = '<strong>Audio Player Nice:</strong> --';
                 }
             }
         }
@@ -1562,6 +1909,9 @@
             stopVideoStream();
             stopListening();
             stopTalking();
+            if (isRecordingVideo) {
+                stopVideoRecording();
+            }
         });
 
         document.addEventListener('visibilitychange', () => {
@@ -1576,6 +1926,7 @@
         initializeServerAudioDeviceControls();
         initializeCameraRotationControl();
         initializeCameraSettingsControl();
+        initializeVideoRecordingControl();
         startVideoStream();
         refreshSystemStatus();
         setInterval(refreshSystemStatus, 5000);

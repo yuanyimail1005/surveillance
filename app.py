@@ -212,12 +212,25 @@ def list_output_sinks():
     """Return available PulseAudio sinks plus default."""
     sinks = [{'id': '@DEFAULT_SINK@', 'name': 'Default speaker', 'kind': 'default'}]
     try:
-        result = subprocess.run(['pactl', 'list', 'short', 'sinks'], capture_output=True, text=True)
-        if result.returncode != 0:
+        short_result = subprocess.run(['pactl', 'list', 'short', 'sinks'], capture_output=True, text=True)
+        if short_result.returncode != 0:
             return sinks
 
+        # Build a sink-name -> human description map from `pactl list sinks`.
+        description_map = {}
+        long_result = subprocess.run(['pactl', 'list', 'sinks'], capture_output=True, text=True)
+        if long_result.returncode == 0:
+            current_name = None
+            for raw_line in long_result.stdout.splitlines():
+                line = raw_line.strip()
+                if line.startswith('Name:'):
+                    current_name = line.split(':', 1)[1].strip()
+                elif line.startswith('Description:') and current_name:
+                    description_map[current_name] = line.split(':', 1)[1].strip()
+                    current_name = None
+
         seen = set(['@DEFAULT_SINK@'])
-        for raw_line in result.stdout.splitlines():
+        for raw_line in short_result.stdout.splitlines():
             parts = raw_line.split('\t')
             if len(parts) < 2:
                 continue
@@ -225,9 +238,7 @@ def list_output_sinks():
             if not sink_name or sink_name in seen:
                 continue
             seen.add(sink_name)
-            description = parts[1].strip()
-            if len(parts) >= 5 and parts[4].strip():
-                description = parts[4].strip()
+            description = description_map.get(sink_name, sink_name)
             sinks.append({'id': sink_name, 'name': description, 'kind': 'pulseaudio-sink'})
     except Exception as e:
         print(f'Error listing output sinks: {e}')
@@ -999,12 +1010,18 @@ def status():
 @app.route('/server_audio_devices', methods=['GET'])
 def server_audio_devices():
     """List server-side capture devices and output sinks."""
+    selected_speaker = PULSE_SINK_NAME
+    # Keep initial UI selection on "Default speaker" when the active sink maps to default.
+    resolved_default_sink = _resolve_default_sink()
+    if selected_speaker == resolved_default_sink or selected_speaker == PULSE_ECHO_CANCEL_SINK_NAME:
+        selected_speaker = '@DEFAULT_SINK@'
+
     return jsonify({
         'status': 'ok',
         'microphones': list_capture_devices(),
         'speakers': list_output_sinks(),
         'selected_microphone': MICROPHONE_DEVICE,
-        'selected_speaker': PULSE_SINK_NAME
+        'selected_speaker': selected_speaker
     })
 
 @app.route('/server_audio_devices/select', methods=['POST'])
