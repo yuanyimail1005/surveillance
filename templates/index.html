@@ -26,8 +26,8 @@
             background: white;
             border-radius: 15px;
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-            width: min(96vw, calc(96dvh * 16 / 9));
-            height: min(96dvh, calc(96vw * 9 / 16));
+            width: 96vw;
+            max-height: 96dvh;
             aspect-ratio: 16 / 9;
             padding: 20px;
             overflow: auto;
@@ -42,7 +42,7 @@
 
         .content {
             display: grid;
-            grid-template-columns: 1.35fr 1fr;
+            grid-template-columns: 1.8fr 0.8fr;
             gap: 16px;
             align-items: start;
         }
@@ -56,7 +56,7 @@
         #video-feed {
             width: 100%;
             aspect-ratio: 16 / 9;
-            object-fit: cover;
+            object-fit: contain;
             border-radius: 10px;
             border: 3px solid #667eea;
             background: #000;
@@ -401,38 +401,49 @@
             <div class="video-section">
                 <img id="video-feed" alt="Live Video Feed">
                 <div class="video-tools">
-                    <label for="camera-rotation">Camera Rotation</label>
-                    <select id="camera-rotation" class="rotation-select">
-                        <option value="0">0° (Default)</option>
-                        <option value="90">90°</option>
-                        <option value="180">180°</option>
-                        <option value="270">270°</option>
-                    </select>
-                </div>
-                <div class="video-tools">
-                    <label for="camera-resolution">📷 Camera Stream</label>
-                    <select id="camera-resolution" class="rotation-select"></select>
-                    <label for="camera-fps" style="margin-top:10px; display:block;">FPS</label>
-                    <input
-                        id="camera-fps"
-                        class="rotation-select"
-                        type="number"
-                        min="1"
-                        max="60"
-                        step="1"
-                        value="25"
-                        style="margin-top:4px;"
-                    >
+                    <div style="display:flex; gap:12px; align-items:flex-end;">
+                        <div style="flex:1;">
+                            <label for="camera-rotation">Camera Rotation</label>
+                            <select id="camera-rotation" class="rotation-select">
+                                <option value="0">0° (Default)</option>
+                                <option value="90">90°</option>
+                                <option value="180">180°</option>
+                                <option value="270">270°</option>
+                            </select>
+                        </div>
+                        <div style="flex:1;">
+                            <label for="camera-resolution">📷 Camera Stream</label>
+                            <select id="camera-resolution" class="rotation-select"></select>
+                        </div>
+                        <div style="flex:0 0 80px;">
+                            <label for="camera-fps">FPS</label>
+                            <input
+                                id="camera-fps"
+                                class="rotation-select"
+                                type="number"
+                                min="1"
+                                max="60"
+                                step="1"
+                                value="25"
+                            >
+                        </div>
+                    </div>
                     <button id="apply-camera-settings-btn" class="btn-primary" style="margin-top:10px; min-width:0; width:100%;">
                         Apply Camera Settings
                     </button>
                     <p class="volume-text" id="camera-settings-status">Loading camera settings...</p>
                 </div>
                 <div class="video-tools">
-                    <label for="server-mic-select">🎤 Server Microphone</label>
-                    <select id="server-mic-select" class="rotation-select"></select>
-                    <label for="server-speaker-select" style="margin-top:10px; display:block;">🔈 Server Speaker</label>
-                    <select id="server-speaker-select" class="rotation-select" style="margin-top:4px;"></select>
+                    <div style="display:flex; gap:12px; align-items:flex-end;">
+                        <div style="flex:1;">
+                            <label for="server-mic-select">🎤 Pi Microphone</label>
+                            <select id="server-mic-select" class="rotation-select"></select>
+                        </div>
+                        <div style="flex:1;">
+                            <label for="server-speaker-select">🔈 Pi Speaker</label>
+                            <select id="server-speaker-select" class="rotation-select"></select>
+                        </div>
+                    </div>
                     <p class="volume-text" id="server-device-status">Loading server audio devices...</p>
                 </div>
             </div>
@@ -867,10 +878,23 @@
             fetchSpeakerVolume();
         }
 
+        function updateVideoRatio(width, height) {
+            const ratio = `${width} / ${height}`;
+            const container = document.querySelector('.container');
+            const feed = document.getElementById('video-feed');
+            if (container) {
+                container.style.aspectRatio = ratio;
+                container.style.width = `min(96vw, calc(96dvh * ${width} / ${height}))`;
+                container.style.maxHeight = '96dvh';
+            }
+            if (feed) feed.style.aspectRatio = ratio;
+        }
+
         function updateVideoInfo(width, height, fps) {
             const videoInfo = document.getElementById('video-info');
             if (!videoInfo) return;
             videoInfo.innerHTML = `<strong>Video:</strong> ${width}x${height} @ ${fps}fps`;
+            updateVideoRatio(width, height);
         }
 
         function populateResolutionSelect(options, selectedWidth, selectedHeight) {
