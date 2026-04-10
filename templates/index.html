@@ -559,10 +559,18 @@
         let recordingContext = null;
         let recordingAnimationFrame = null;
         let recordingCanvasStream = null;
+        let recordingCombinedStream = null;
         let recordingMediaRecorder = null;
         let recordingChunks = [];
         let recordingMimeType = '';
         let recordingDirectoryHandle = null;
+        let recordingRotationDegrees = 0;
+        let recordingAudioDestination = null;
+        let recordingAudioGain = null;
+        let recordingAudioSocket = null;
+        let recordingTalkMicSource = null;
+        let recordingTalkMicGain = null;
+        let nextRecordingAudioTime = 0;
         let listenSocket = null;
         let listenReconnectTimer = null;
         let talkSocket = null;
@@ -952,6 +960,130 @@
             return `recording_${yyyy}${mm}${dd}_${hh}${mi}${ss}.webm`;
         }
 
+        function getSelectedRotationDegrees() {
+            const rotationSelect = document.getElementById('camera-rotation');
+            const raw = rotationSelect ? Number(rotationSelect.value) : Number(localStorage.getItem(ROTATION_STORAGE_KEY));
+            return [0, 90, 180, 270].includes(raw) ? raw : 0;
+        }
+
+        function pushRecordingAudioChunk(arrayBuffer) {
+            if (!audioContext || !recordingAudioGain) {
+                return;
+            }
+
+            const sampleCount = Math.floor(arrayBuffer.byteLength / 2);
+            if (sampleCount <= 0) {
+                return;
+            }
+
+            const int16Array = new Int16Array(arrayBuffer, 0, sampleCount);
+            const audioBuffer = audioContext.createBuffer(1, int16Array.length, 48000);
+            const channelData = audioBuffer.getChannelData(0);
+            for (let i = 0; i < int16Array.length; i++) {
+                channelData[i] = int16Array[i] / 32768;
+            }
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(recordingAudioGain);
+
+            const now = audioContext.currentTime;
+            if (nextRecordingAudioTime < now + 0.01) {
+                nextRecordingAudioTime = now + 0.01;
+            }
+            source.start(nextRecordingAudioTime);
+            nextRecordingAudioTime += audioBuffer.duration;
+        }
+
+        function attachTalkMicToRecordingMix() {
+            if (!audioContext || !recordingAudioDestination || !micStream) {
+                return;
+            }
+
+            if (recordingTalkMicSource) {
+                return;
+            }
+
+            recordingTalkMicSource = audioContext.createMediaStreamSource(micStream);
+            recordingTalkMicGain = audioContext.createGain();
+            recordingTalkMicGain.gain.value = 1.5;
+            recordingTalkMicSource.connect(recordingTalkMicGain);
+            recordingTalkMicGain.connect(recordingAudioDestination);
+        }
+
+        function detachTalkMicFromRecordingMix() {
+            if (recordingTalkMicSource) {
+                try {
+                    recordingTalkMicSource.disconnect();
+                } catch (_) {}
+                recordingTalkMicSource = null;
+            }
+            if (recordingTalkMicGain) {
+                try {
+                    recordingTalkMicGain.disconnect();
+                } catch (_) {}
+                recordingTalkMicGain = null;
+            }
+        }
+
+        async function startRecordingAudioCapture() {
+            await initAudioContext();
+
+            if (!recordingAudioDestination) {
+                recordingAudioDestination = audioContext.createMediaStreamDestination();
+                recordingAudioGain = audioContext.createGain();
+                recordingAudioGain.gain.value = 1;
+                recordingAudioGain.connect(recordingAudioDestination);
+            }
+
+            nextRecordingAudioTime = audioContext.currentTime;
+
+            return new Promise((resolve, reject) => {
+                const socket = openBinarySocket('/audio_feed', 'arraybuffer');
+                let opened = false;
+
+                socket.addEventListener('open', () => {
+                    opened = true;
+                    recordingAudioSocket = socket;
+                    attachTalkMicToRecordingMix();
+                    resolve(recordingAudioDestination.stream.getAudioTracks()[0] || null);
+                }, { once: true });
+
+                socket.addEventListener('message', (event) => {
+                    if (socket !== recordingAudioSocket || !(event.data instanceof ArrayBuffer)) {
+                        return;
+                    }
+                    pushRecordingAudioChunk(event.data);
+                });
+
+                socket.addEventListener('close', () => {
+                    if (socket === recordingAudioSocket) {
+                        recordingAudioSocket = null;
+                    }
+                    if (isRecordingVideo && opened) {
+                        setRecordingStatus('Recording continues, but Pi audio stream disconnected');
+                    }
+                });
+
+                socket.addEventListener('error', () => {
+                    if (!opened) {
+                        reject(new Error('Unable to connect to Pi audio stream for recording'));
+                    }
+                }, { once: true });
+            });
+        }
+
+        function stopRecordingAudioCapture() {
+            detachTalkMicFromRecordingMix();
+            if (recordingAudioSocket) {
+                if (recordingAudioSocket.readyState === WebSocket.OPEN || recordingAudioSocket.readyState === WebSocket.CONNECTING) {
+                    recordingAudioSocket.close();
+                }
+                recordingAudioSocket = null;
+            }
+            nextRecordingAudioTime = 0;
+        }
+
         async function ensureDirectoryPermission(handle) {
             const permissionMode = { mode: 'readwrite' };
             if ((await handle.queryPermission(permissionMode)) === 'granted') {
@@ -1074,7 +1206,20 @@
 
             const feed = document.getElementById('video-feed');
             if (feed && feed.naturalWidth > 0 && feed.naturalHeight > 0) {
-                recordingContext.drawImage(feed, 0, 0, recordingCanvas.width, recordingCanvas.height);
+                const rotation = recordingRotationDegrees;
+                recordingContext.fillStyle = '#000';
+                recordingContext.fillRect(0, 0, recordingCanvas.width, recordingCanvas.height);
+                recordingContext.save();
+                recordingContext.translate(recordingCanvas.width / 2, recordingCanvas.height / 2);
+                recordingContext.rotate((rotation * Math.PI) / 180);
+                recordingContext.drawImage(
+                    feed,
+                    -feed.naturalWidth / 2,
+                    -feed.naturalHeight / 2,
+                    feed.naturalWidth,
+                    feed.naturalHeight
+                );
+                recordingContext.restore();
             }
             recordingAnimationFrame = requestAnimationFrame(renderRecordingFrame);
         }
@@ -1091,10 +1236,13 @@
             if (recordingCanvasStream) {
                 recordingCanvasStream.getTracks().forEach((track) => track.stop());
             }
+            stopRecordingAudioCapture();
+            recordingCombinedStream = null;
             recordingCanvasStream = null;
             recordingMediaRecorder = null;
             recordingCanvas = null;
             recordingContext = null;
+            recordingRotationDegrees = 0;
         }
 
         async function startVideoRecording() {
@@ -1116,8 +1264,12 @@
 
             try {
                 setRecordingStatus('Starting recording...');
-                const width = Math.max(1, Number(cameraSettings.width || feed.naturalWidth || 1280));
-                const height = Math.max(1, Number(cameraSettings.height || feed.naturalHeight || 720));
+                const sourceWidth = Math.max(1, Number(cameraSettings.width || feed.naturalWidth || 1280));
+                const sourceHeight = Math.max(1, Number(cameraSettings.height || feed.naturalHeight || 720));
+                recordingRotationDegrees = getSelectedRotationDegrees();
+                const isQuarterTurn = recordingRotationDegrees === 90 || recordingRotationDegrees === 270;
+                const width = isQuarterTurn ? sourceHeight : sourceWidth;
+                const height = isQuarterTurn ? sourceWidth : sourceHeight;
                 const fps = Math.max(1, Math.min(30, Number(cameraSettings.fps || 20)));
 
                 recordingCanvas = document.createElement('canvas');
@@ -1126,7 +1278,19 @@
                 recordingContext = recordingCanvas.getContext('2d', { alpha: false });
 
                 recordingCanvasStream = recordingCanvas.captureStream(fps);
-                recordingMediaRecorder = new MediaRecorder(recordingCanvasStream, {
+                recordingCombinedStream = new MediaStream();
+                recordingCanvasStream.getVideoTracks().forEach((track) => recordingCombinedStream.addTrack(track));
+
+                try {
+                    const recordingAudioTrack = await startRecordingAudioCapture();
+                    if (recordingAudioTrack) {
+                        recordingCombinedStream.addTrack(recordingAudioTrack);
+                    }
+                } catch (audioError) {
+                    console.warn('Recording audio unavailable:', audioError);
+                }
+
+                recordingMediaRecorder = new MediaRecorder(recordingCombinedStream, {
                     mimeType: recordingMimeType,
                     videoBitsPerSecond: 4_000_000
                 });
@@ -1148,7 +1312,8 @@
                 updateRecordingButton();
                 renderRecordingFrame();
                 recordingMediaRecorder.start(1000);
-                setRecordingStatus('Recording on this client...');
+                const hasAudio = recordingCombinedStream.getAudioTracks().length > 0;
+                setRecordingStatus(hasAudio ? 'Recording video + Pi audio on this client...' : 'Recording video only on this client...');
             } catch (error) {
                 isRecordingVideo = false;
                 updateRecordingButton();
@@ -1738,6 +1903,10 @@
                 isTalking = true;
                 updateUIStatus('talk', true);
 
+                if (isRecordingVideo) {
+                    attachTalkMicToRecordingMix();
+                }
+
                 micSourceNode = audioContext.createMediaStreamSource(stream);
 
                 // Keep voice frequencies and reduce low-frequency rumble / hiss.
@@ -1871,6 +2040,8 @@
                 }
                 talkSocket = null;
             }
+
+            detachTalkMicFromRecordingMix();
 
             resetVolumeMeter('volume-bar', 'volume-text', 'talk');
             updateUIStatus('talk', false);
