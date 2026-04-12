@@ -1,6 +1,3 @@
-import os
-os.environ['ALSA_CARD'] = 'default'
-
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from flask_sock import Sock
@@ -14,6 +11,39 @@ import threading
 import struct
 import re
 import werkzeug.serving
+
+from config import (
+    VIDEO_ALLOWED_RESOLUTIONS,
+    VIDEO_MIN_FPS,
+    VIDEO_MAX_FPS,
+    DEFAULT_CAMERA_WIDTH,
+    DEFAULT_CAMERA_HEIGHT,
+    DEFAULT_CAMERA_FPS,
+    SPEAKER_DEVICE,
+    PULSE_SINK_NAME,
+    PULSE_CAPTURE_SOURCE_NAME,
+    SAMPLE_RATE,
+    MIC_CHANNELS,
+    SPEAKER_CHANNELS,
+    AUDIO_PLAYER_NICE,
+    TALKBACK_HIGHPASS_HZ,
+    TALKBACK_LOWPASS_HZ,
+    TALKBACK_WORKLET_CHUNK_SAMPLES,
+    TALKBACK_ECHO_CANCELLATION,
+    TALKBACK_NOISE_SUPPRESSION,
+    TALKBACK_AUTO_GAIN_CONTROL,
+    TALKBACK_LATENCY_SECONDS,
+    TALKBACK_PLAYBACK_GAIN,
+    PULSE_ECHO_CANCEL_ENABLED,
+    PULSE_ECHO_CANCEL_AEC_METHOD,
+    PULSE_ECHO_CANCEL_SOURCE_NAME,
+    PULSE_ECHO_CANCEL_SINK_NAME,
+    SPEAKER_VOLUME_CONTROLS,
+    SERVER_HOST,
+    SERVER_PORT,
+    SSL_CERT_PATH,
+    SSL_KEY_PATH,
+)
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
@@ -29,23 +59,6 @@ app = Flask(__name__)
 CORS(app)
 sock = Sock(app)
 
-VIDEO_ALLOWED_RESOLUTIONS = [
-    (640, 480),
-    (1296, 972),
-    (1920, 1080),
-    (2592, 1944),
-]
-VIDEO_MIN_FPS = 1
-VIDEO_MAX_FPS = 60
-
-DEFAULT_CAMERA_WIDTH = int(os.environ.get('CAMERA_WIDTH', '1920'))
-DEFAULT_CAMERA_HEIGHT = int(os.environ.get('CAMERA_HEIGHT', '1080'))
-DEFAULT_CAMERA_FPS = int(os.environ.get('CAMERA_FPS', '25'))
-
-if (DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT) not in VIDEO_ALLOWED_RESOLUTIONS:
-    DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT = 1920, 1080
-DEFAULT_CAMERA_FPS = max(VIDEO_MIN_FPS, min(VIDEO_MAX_FPS, DEFAULT_CAMERA_FPS))
-
 camera_settings = {
     'width': DEFAULT_CAMERA_WIDTH,
     'height': DEFAULT_CAMERA_HEIGHT,
@@ -57,61 +70,42 @@ print("\n" + "="*60)
 print("Raspberry Pi Surveillance System - Starting")
 print("="*60 + "\n")
 
-# Audio device configuration
-MICROPHONE_DEVICE = os.environ.get('MICROPHONE_DEVICE', 'default')
-SPEAKER_DEVICE = os.environ.get('SPEAKER_DEVICE', 'default')
-PULSE_SINK_NAME = os.environ.get('PULSE_SINK_NAME', '@DEFAULT_SINK@')
-SAMPLE_RATE = 48000               # Matches successful test
-MIC_CHANNELS = 1
-SPEAKER_CHANNELS = 2
-AUDIO_PLAYER_NICE = int(os.environ.get('AUDIO_PLAYER_NICE', '0'))
-TALKBACK_HIGHPASS_HZ = 100
-TALKBACK_LOWPASS_HZ = 5000
-TALKBACK_WORKLET_CHUNK_SAMPLES = 8192
-TALKBACK_ECHO_CANCELLATION = True
-TALKBACK_NOISE_SUPPRESSION = True
-TALKBACK_AUTO_GAIN_CONTROL = False
-TALKBACK_LATENCY_SECONDS = 0.02
-PULSE_ECHO_CANCEL_ENABLED = os.environ.get('PULSE_ECHO_CANCEL_ENABLED', 'true').lower() != 'false'
-PULSE_ECHO_CANCEL_AEC_METHOD = os.environ.get('PULSE_ECHO_CANCEL_AEC_METHOD', 'webrtc')
-PULSE_ECHO_CANCEL_SOURCE_NAME = os.environ.get('PULSE_ECHO_CANCEL_SOURCE_NAME', 'surveillance_ec_source')
-PULSE_ECHO_CANCEL_SINK_NAME = os.environ.get('PULSE_ECHO_CANCEL_SINK_NAME', 'surveillance_ec_sink')
-PULSE_CAPTURE_SOURCE = os.environ.get('PULSE_CAPTURE_SOURCE', '')
-try:
-    TALKBACK_PLAYBACK_GAIN = float(os.environ.get('TALKBACK_PLAYBACK_GAIN', '5.0'))
-except ValueError:
-    TALKBACK_PLAYBACK_GAIN = 5.0
-TALKBACK_PLAYBACK_GAIN = max(0.1, min(12.0, TALKBACK_PLAYBACK_GAIN))
 pulseaudio_started_by_app = False
 echo_cancel_module_id = None
 device_switch_lock = threading.Lock()
 audio_proc_lock = threading.Lock()
 
 def list_capture_devices():
-    """Return available ALSA capture devices plus default."""
-    devices = [{'id': 'default', 'name': 'Default microphone', 'kind': 'default'}]
+    """Return available PulseAudio capture sources plus default."""
+    devices = [{'id': '@DEFAULT_SOURCE@', 'name': 'Default microphone', 'kind': 'default'}]
     try:
-        result = subprocess.run(['arecord', '-l'], capture_output=True, text=True)
-        if result.returncode != 0:
+        short_result = subprocess.run(['pactl', 'list', 'short', 'sources'], capture_output=True, text=True)
+        if short_result.returncode != 0:
             return devices
 
-        pattern = re.compile(r'card\s+(\d+):\s*([^\[]+)\[([^\]]+)\],\s*device\s+(\d+):\s*([^\[]+)\[([^\]]*)\]')
-        seen = set(['default'])
-        for raw_line in result.stdout.splitlines():
-            line = raw_line.strip()
-            match = pattern.search(line)
-            if not match:
+        description_map = {}
+        long_result = subprocess.run(['pactl', 'list', 'sources'], capture_output=True, text=True)
+        if long_result.returncode == 0:
+            current_name = None
+            for raw_line in long_result.stdout.splitlines():
+                line = raw_line.strip()
+                if line.startswith('Name:'):
+                    current_name = line.split(':', 1)[1].strip()
+                elif line.startswith('Description:') and current_name:
+                    description_map[current_name] = line.split(':', 1)[1].strip()
+                    current_name = None
+
+        seen = set(['@DEFAULT_SOURCE@'])
+        for raw_line in short_result.stdout.splitlines():
+            parts = raw_line.split('\t')
+            if len(parts) < 2:
                 continue
-            card = match.group(1)
-            card_desc = match.group(3).strip()
-            device = match.group(4)
-            device_desc = match.group(6).strip()
-            device_id = f'plughw:{card},{device}'
-            if device_id in seen:
+            source_name = parts[1].strip()
+            if not source_name or source_name in seen or source_name.endswith('.monitor'):
                 continue
-            seen.add(device_id)
-            label = card_desc if not device_desc else f'{card_desc} / {device_desc}'
-            devices.append({'id': device_id, 'name': label, 'kind': 'alsa-capture'})
+            seen.add(source_name)
+            description = description_map.get(source_name, source_name)
+            devices.append({'id': source_name, 'name': description, 'kind': 'pulseaudio-source'})
     except Exception as e:
         print(f'Error listing capture devices: {e}')
     return devices
@@ -143,8 +137,8 @@ def _resolve_default_source():
     return None
 
 def _setup_pulseaudio_echo_cancel():
-    """Create PulseAudio echo-cancel source/sink and route app audio through it."""
-    global echo_cancel_module_id, PULSE_CAPTURE_SOURCE, PULSE_SINK_NAME
+    """Create PulseAudio echo-cancel source/sink, optionally chaining LADSPA highpass/lowpass filter."""
+    global echo_cancel_module_id, PULSE_CAPTURE_SOURCE_NAME, PULSE_SINK_NAME
 
     if not PULSE_ECHO_CANCEL_ENABLED:
         return False
@@ -152,11 +146,35 @@ def _setup_pulseaudio_echo_cancel():
     if echo_cancel_module_id is not None:
         return True
 
-    sink_master = _resolve_default_sink()
-    source_master = _resolve_default_source()
-    if not sink_master or not source_master:
-        print('⚠ PulseAudio echo cancel: default sink/source not available')
+    # Always use the real hardware devices as masters, never the echo-cancel virtual devices
+    sink_master = PULSE_SINK_NAME
+    if not sink_master or sink_master == '@DEFAULT_SINK@' or sink_master == PULSE_ECHO_CANCEL_SINK_NAME:
+        sink_master = _resolve_default_sink()
+        if sink_master == PULSE_ECHO_CANCEL_SINK_NAME:
+            sinks = list_output_sinks()
+            for s in sinks:
+                if s['id'] not in ('@DEFAULT_SINK@', PULSE_ECHO_CANCEL_SINK_NAME):
+                    sink_master = s['id']
+                    break
+
+    source_master = PULSE_CAPTURE_SOURCE_NAME
+    if not source_master or source_master == '@DEFAULT_SOURCE@' or source_master == PULSE_ECHO_CANCEL_SOURCE_NAME:
+        source_master = _resolve_default_source()
+        if source_master == PULSE_ECHO_CANCEL_SOURCE_NAME:
+            sources = list_capture_devices()
+            for s in sources:
+                if s['id'] not in ('@DEFAULT_SOURCE@', PULSE_ECHO_CANCEL_SOURCE_NAME):
+                    source_master = s['id']
+                    break
+
+    if not sink_master or not source_master or \
+       sink_master == PULSE_ECHO_CANCEL_SINK_NAME or \
+       source_master == PULSE_ECHO_CANCEL_SOURCE_NAME:
+        print('⚠ PulseAudio echo cancel: selected/default sink/source not available or would chain echo-cancel')
         return False
+
+    # Debug: print source_master and sink_master before LADSPA filter chaining
+    print(f"[DEBUG] LADSPA chaining: source_master={source_master}, sink_master={sink_master}")
 
     cmd = [
         'pactl',
@@ -185,11 +203,11 @@ def _setup_pulseaudio_echo_cancel():
         echo_cancel_module_id = None
 
     # Route app capture/playback through the echo-cancel virtual devices.
-    PULSE_CAPTURE_SOURCE = PULSE_ECHO_CANCEL_SOURCE_NAME
+    PULSE_CAPTURE_SOURCE_NAME = PULSE_ECHO_CANCEL_SOURCE_NAME
     PULSE_SINK_NAME = PULSE_ECHO_CANCEL_SINK_NAME
     print(
         f'✓ PulseAudio echo cancel enabled '
-        f'(source={PULSE_CAPTURE_SOURCE}, sink={PULSE_SINK_NAME}, method={PULSE_ECHO_CANCEL_AEC_METHOD})'
+        f'(source={PULSE_CAPTURE_SOURCE_NAME}, sink={PULSE_SINK_NAME}, method={PULSE_ECHO_CANCEL_AEC_METHOD})'
     )
     return True
 
@@ -245,7 +263,7 @@ def list_output_sinks():
     return sinks
 
 def restart_audio_capture_process():
-    """Restart arecord process with the current microphone device."""
+    """Restart audio capture process with the current capture source."""
     global audio_proc
     with audio_proc_lock:
         if audio_proc is not None:
@@ -263,7 +281,7 @@ def restart_audio_capture_process():
         return audio_proc is not None
 
 def ensure_audio_capture_process_running():
-    """Ensure arecord process exists and is alive."""
+    """Ensure audio capture process exists and is alive."""
     global audio_proc
 
     with audio_proc_lock:
@@ -272,76 +290,6 @@ def ensure_audio_capture_process_running():
         print('⚙ Audio capture process not running, restarting...')
         audio_proc = start_audio()
         return audio_proc is not None
-
-def _probe_capture_device_busy(device_id):
-    """Best-effort check whether opening a capture device reports busy."""
-    try:
-        result = subprocess.run(
-            [
-                'arecord',
-                '-D', device_id,
-                '-f', 'S16_LE',
-                '-r', str(SAMPLE_RATE),
-                '-c', str(MIC_CHANNELS),
-                '-d', '1',
-                '/dev/null'
-            ],
-            capture_output=True,
-            text=True,
-            timeout=3
-        )
-        if result.returncode == 0:
-            return False
-        combined = f"{result.stdout}\n{result.stderr}".lower()
-        return 'device or resource busy' in combined
-    except Exception:
-        return False
-
-def find_pulse_sink(search_vendor='1908'):
-    """Find PulseAudio sink name matching the USB speaker vendor ID."""
-    try:
-        result = subprocess.run(['pactl', 'list', 'short', 'sinks'],
-                                capture_output=True, text=True)
-        if result.returncode != 0:
-            return None
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and search_vendor in parts[1]:
-                return parts[1]
-    except Exception as e:
-        print(f"Error finding PulseAudio sink: {e}")
-    return None
-
-def find_usb_device(device_type, search_name=None):
-    """Find USB device card number"""
-    try:
-        if device_type == "playback":
-            cmd = ["aplay", "-l"]
-        else:
-            cmd = ["arecord", "-l"]
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        for line in result.stdout.split('\n'):
-            if 'card' in line and ':' in line:
-                # Extract card number
-                parts = line.split('card ')
-                if len(parts) > 1:
-                    card_num = parts[1].split(':')[0].strip()
-
-                    # Match by search name if provided
-                    if search_name:
-                        if search_name.lower() in line.lower():
-                            return card_num
-                    else:
-                        # Return first USB device
-                        if 'USB' in line or 'usb' in line.lower():
-                            return card_num
-
-        return None
-    except Exception as e:
-        print(f"Error finding {device_type} device: {e}")
-        return None
 
 def ensure_pulseaudio_daemon_running():
     """Start PulseAudio daemon if it is not already running."""
@@ -382,86 +330,58 @@ print("\n=== Detecting Audio Devices ===\n")
 
 ensure_pulseaudio_daemon_running()
 
-speaker_card = find_usb_device("playback")
-microphone_card = find_usb_device("capture")
-
-if speaker_card:
-    print(f"✓ Speaker card detected: {speaker_card}")
-else:
-    print("⚠ Speaker card not detected")
-
-pulse_sink = find_pulse_sink()
-if pulse_sink:
-    print(f"✓ PulseAudio sink detected: {pulse_sink}")
-else:
-    print("⚠ PulseAudio sink not auto-detected")
-
-if microphone_card:
-    print(f"✓ Microphone card detected: {microphone_card}")
-else:
-    print("⚠ Microphone card not detected")
-
 if PULSE_ECHO_CANCEL_ENABLED:
     _setup_pulseaudio_echo_cancel()
 
-print(f"Using microphone device: {MICROPHONE_DEVICE}")
+    print(f"Using microphone source: {PULSE_CAPTURE_SOURCE_NAME or '@DEFAULT_SOURCE@'}")
 print(f"Using speaker sink: {PULSE_SINK_NAME}")
 
 print()
 
-SPEAKER_VOLUME_CONTROLS = ('Speaker', 'PCM', 'Master', 'Headphone')
-
-def _get_speaker_card_number():
-    """Resolve ALSA card number from detected speaker settings."""
-    if speaker_card:
-        return str(speaker_card)
-
-    if SPEAKER_DEVICE.startswith('hw:'):
-        # SPEAKER_DEVICE is like hw:<card>,<device>
-        device_part = SPEAKER_DEVICE[3:]
-        card_part = device_part.split(',')[0].strip()
-        if card_part:
-            return card_part
-
-    return None
-
 def _get_speaker_volume_percent():
-    """Read current speaker volume percent using amixer."""
-    card = _get_speaker_card_number()
-    if card is None:
+    """Read current speaker volume percent using pactl on PulseAudio sink."""
+    sink = PULSE_SINK_NAME
+    if not sink or sink in ('@DEFAULT_SINK@', 'default'):
+        sink = _resolve_default_sink()
+    if not sink:
         return None, None
 
-    for control in SPEAKER_VOLUME_CONTROLS:
-        result = subprocess.run(
-            ['amixer', '-c', card, 'sget', control],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            continue
+    # pactl returns e.g. 'Volume: front-left: 65536 / 100% / 0.00 dB, ...'
+    result = subprocess.run(
+        ['pactl', 'list', 'sinks'],
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        return None, None
 
-        match = re.search(r'\[(\d{1,3})%\]', result.stdout)
-        if match:
-            return int(match.group(1)), control
-
+    in_sink = False
+    for line in result.stdout.splitlines():
+        if line.strip().startswith('Name:'):
+            in_sink = (line.split(':', 1)[1].strip() == sink)
+        if in_sink and 'Volume:' in line:
+            # Find the first percentage in the line
+            match = re.search(r'(\d{1,3})%', line)
+            if match:
+                return int(match.group(1)), 'pactl'
     return None, None
 
 def _set_speaker_volume_percent(volume_percent):
-    """Set speaker volume percent using amixer, trying common controls."""
-    card = _get_speaker_card_number()
-    if card is None:
+    """Set speaker volume percent using pactl on PulseAudio sink."""
+    sink = PULSE_SINK_NAME
+    if not sink or sink in ('@DEFAULT_SINK@', 'default'):
+        sink = _resolve_default_sink()
+    if not sink:
         return None
 
     volume_percent = max(0, min(100, int(volume_percent)))
-    for control in SPEAKER_VOLUME_CONTROLS:
-        result = subprocess.run(
-            ['amixer', '-c', card, 'sset', control, f'{volume_percent}%'],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            return control
-
+    result = subprocess.run(
+        ['pactl', 'set-sink-volume', sink, f'{volume_percent}%'],
+        capture_output=True,
+        text=True
+    )
+    if result.returncode == 0:
+        return 'pactl'
     return None
 
 # Audio playback pipeline
@@ -650,29 +570,25 @@ def ensure_camera_process_running():
         return camera_proc is not None
 
 def start_audio():
-    """Start audio recording from selected microphone device."""
+    """Start audio recording from selected PulseAudio source."""
     try:
-        use_pulse_capture = bool(PULSE_CAPTURE_SOURCE)
-        if use_pulse_capture:
-            print(f"Starting audio recording from PulseAudio source ({PULSE_CAPTURE_SOURCE})...")
-            cmd = [
-                'parec',
-                '--device', PULSE_CAPTURE_SOURCE,
-                '--format=s16le',
-                '--rate', str(SAMPLE_RATE),
-                '--channels', str(MIC_CHANNELS),
-                '--raw'
-            ]
-        else:
-            print(f"Starting audio recording from microphone ({MICROPHONE_DEVICE})...")
-            cmd = [
-                'arecord',
-                '-D', MICROPHONE_DEVICE,
-                '-f', 'S16_LE',
-                '-r', str(SAMPLE_RATE),
-                '-c', str(MIC_CHANNELS),
-                '-'
-            ]
+        capture_source = PULSE_CAPTURE_SOURCE_NAME
+        if not capture_source or capture_source in ('@DEFAULT_SOURCE@', 'default'):
+            capture_source = _resolve_default_source()
+
+        if not capture_source:
+            print('⚠ Audio failed: PulseAudio default source not available\n')
+            return None
+
+        print(f"Starting audio recording from PulseAudio source ({capture_source})...")
+        cmd = [
+            'parec',
+            '--device', capture_source,
+            '--format=s16le',
+            '--rate', str(SAMPLE_RATE),
+            '--channels', str(MIC_CHANNELS),
+            '--raw'
+        ]
 
         proc = subprocess.Popen(
             cmd,
@@ -681,38 +597,14 @@ def start_audio():
             bufsize=4096
         )
 
-        # Give arecord a brief moment so immediate open failures are caught.
+        # Give parec a brief moment so immediate open failures are caught.
         time.sleep(0.2)
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode('utf-8', errors='ignore')
-            if use_pulse_capture:
-                print(f"⚠ PulseAudio capture process died: {stderr}\n")
-                print("⚙ Falling back to direct ALSA capture via arecord")
-                fallback = subprocess.Popen(
-                    [
-                        'arecord',
-                        '-D', MICROPHONE_DEVICE,
-                        '-f', 'S16_LE',
-                        '-r', str(SAMPLE_RATE),
-                        '-c', str(MIC_CHANNELS),
-                        '-'
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=4096
-                )
-                time.sleep(0.2)
-                if fallback.poll() is not None:
-                    fb_stderr = fallback.stderr.read().decode('utf-8', errors='ignore')
-                    print(f"⚠ ALSA fallback also failed: {fb_stderr}\n")
-                    return None
-                print(f"✓ Audio recording started via ALSA fallback (Mono, {SAMPLE_RATE}Hz)\n")
-                return fallback
-
-            print(f"⚠ Audio process died: {stderr}\n")
+            print(f"⚠ PulseAudio capture process died: {stderr}\n")
             return None
 
-        mode = 'PulseAudio echo-cancel source' if use_pulse_capture else 'ALSA capture'
+        mode = 'PulseAudio echo-cancel source' if capture_source == PULSE_ECHO_CANCEL_SOURCE_NAME else 'PulseAudio source'
         print(f"✓ Audio recording started ({mode}, Mono, {SAMPLE_RATE}Hz)\n")
         return proc
     except Exception as e:
@@ -1010,24 +902,37 @@ def status():
 @app.route('/server_audio_devices', methods=['GET'])
 def server_audio_devices():
     """List server-side capture devices and output sinks."""
+    selected_microphone = PULSE_CAPTURE_SOURCE_NAME
+    resolved_default_source = _resolve_default_source()
+    if (
+        not selected_microphone
+        or selected_microphone == resolved_default_source
+        or selected_microphone == PULSE_ECHO_CANCEL_SOURCE_NAME
+    ):
+        selected_microphone = '@DEFAULT_SOURCE@'
+
     selected_speaker = PULSE_SINK_NAME
     # Keep initial UI selection on "Default speaker" when the active sink maps to default.
     resolved_default_sink = _resolve_default_sink()
     if selected_speaker == resolved_default_sink or selected_speaker == PULSE_ECHO_CANCEL_SINK_NAME:
         selected_speaker = '@DEFAULT_SINK@'
 
+    # Filter out echo-cancel virtual devices from user selection
+    microphones = [d for d in list_capture_devices() if d['id'] != PULSE_ECHO_CANCEL_SOURCE_NAME]
+    speakers = [d for d in list_output_sinks() if d['id'] != PULSE_ECHO_CANCEL_SINK_NAME]
+
     return jsonify({
         'status': 'ok',
-        'microphones': list_capture_devices(),
-        'speakers': list_output_sinks(),
-        'selected_microphone': MICROPHONE_DEVICE,
+        'microphones': microphones,
+        'speakers': speakers,
+        'selected_microphone': selected_microphone,
         'selected_speaker': selected_speaker
     })
 
 @app.route('/server_audio_devices/select', methods=['POST'])
 def select_server_audio_devices():
     """Switch server-side microphone and/or speaker sink at runtime."""
-    global MICROPHONE_DEVICE, PULSE_SINK_NAME
+    global PULSE_CAPTURE_SOURCE_NAME, PULSE_SINK_NAME
     payload = request.get_json(silent=True) or {}
     microphone = payload.get('microphone')
     speaker = payload.get('speaker')
@@ -1036,77 +941,88 @@ def select_server_audio_devices():
         return jsonify({'status': 'error', 'message': 'No microphone or speaker provided'}), 400
 
     with device_switch_lock:
+        previous_microphone = PULSE_CAPTURE_SOURCE_NAME
+        previous_speaker = PULSE_SINK_NAME
+        microphone_changed = False
+        speaker_changed = False
+
         if microphone is not None:
             valid_mics = {item['id'] for item in list_capture_devices()}
             if microphone not in valid_mics:
                 return jsonify({'status': 'error', 'message': f'Invalid microphone: {microphone}'}), 400
-            if microphone != MICROPHONE_DEVICE:
-                previous_microphone = MICROPHONE_DEVICE
-                # If default capture is already active and the requested hw/plughw
-                # endpoint reports busy, treat it as the same underlying device alias
-                # and avoid a disruptive restart.
-                if (
-                    previous_microphone == 'default'
-                    and (microphone.startswith('hw:') or microphone.startswith('plughw:'))
-                    and audio_proc is not None
-                    and audio_proc.poll() is None
-                    and _probe_capture_device_busy(microphone)
-                ):
-                    MICROPHONE_DEVICE = microphone
-                    print(
-                        f'✓ Microphone selection {microphone} appears to alias active default device; '
-                        'keeping current capture stream.'
-                    )
-                else:
-                    MICROPHONE_DEVICE = microphone
-                    if not restart_audio_capture_process():
-                        MICROPHONE_DEVICE = previous_microphone
-                        restart_audio_capture_process()
-                        return jsonify({
-                            'status': 'error',
-                            'message': f'Failed to switch microphone to {microphone}. Reverted to {previous_microphone}.'
-                        }), 500
-                    print(f'✓ Switched microphone to {MICROPHONE_DEVICE}')
+            if microphone != PULSE_CAPTURE_SOURCE_NAME:
+                PULSE_CAPTURE_SOURCE_NAME = microphone
+                microphone_changed = True
 
         if speaker is not None:
             valid_speakers = {item['id'] for item in list_output_sinks()}
             if speaker not in valid_speakers:
                 return jsonify({'status': 'error', 'message': f'Invalid speaker: {speaker}'}), 400
             if speaker != PULSE_SINK_NAME:
-                previous_speaker = PULSE_SINK_NAME
                 PULSE_SINK_NAME = speaker
-                # If the previous selection was @DEFAULT_SINK@ and the new named sink
-                # resolves to the same underlying sink, skip the disruptive restart.
-                if (
-                    previous_speaker == '@DEFAULT_SINK@'
-                    and _resolve_default_sink() == speaker
-                    and pulse_proc is not None
-                    and pulse_proc.poll() is None
-                ):
-                    print(
-                        f'✓ Speaker selection {speaker} aliases the active default sink; '
-                        'keeping current playback stream.'
-                    )
-                else:
-                    stop_pulse_pipeline()
-                    start_pulse_process()
-                    print(f'✓ Switched speaker sink to {PULSE_SINK_NAME}')
+                speaker_changed = True
+
+        if not microphone_changed and not speaker_changed:
+            return jsonify({
+                'status': 'ok',
+                'selected_microphone': PULSE_CAPTURE_SOURCE_NAME,
+                'selected_speaker': PULSE_SINK_NAME
+            })
+
+        if PULSE_ECHO_CANCEL_ENABLED:
+            _teardown_pulseaudio_echo_cancel()
+            if not _setup_pulseaudio_echo_cancel():
+                PULSE_CAPTURE_SOURCE_NAME = previous_microphone
+                PULSE_SINK_NAME = previous_speaker
+                _teardown_pulseaudio_echo_cancel()
+                _setup_pulseaudio_echo_cancel()
+                restart_audio_capture_process()
+                stop_pulse_pipeline()
+                start_pulse_process()
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Failed to rebuild PulseAudio echo-cancel with selected devices'
+                }), 500
+
+            if not restart_audio_capture_process():
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Echo-cancel rebuilt, but failed to restart audio capture'
+                }), 500
+            stop_pulse_pipeline()
+            start_pulse_process()
+            print('✓ Rebuilt PulseAudio echo-cancel with updated source/sink selection')
+        else:
+            if microphone_changed:
+                if not restart_audio_capture_process():
+                    PULSE_CAPTURE_SOURCE_NAME = previous_microphone
+                    restart_audio_capture_process()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Failed to switch microphone to {microphone}. Reverted to {previous_microphone}.'
+                    }), 500
+                print(f'✓ Switched microphone source to {PULSE_CAPTURE_SOURCE_NAME}')
+
+            if speaker_changed:
+                stop_pulse_pipeline()
+                start_pulse_process()
+                print(f'✓ Switched speaker sink to {PULSE_SINK_NAME}')
 
     return jsonify({
         'status': 'ok',
-        'selected_microphone': MICROPHONE_DEVICE,
+        'selected_microphone': PULSE_CAPTURE_SOURCE_NAME,
         'selected_speaker': PULSE_SINK_NAME
     })
 
 if __name__ == '__main__':
-    print("Server: https://0.0.0.0:5000\n")
+    print(f"Server: https://{SERVER_HOST}:{SERVER_PORT}\n")
     try:
         app.run(
-            host='0.0.0.0',
-            port=5000,
+            host=SERVER_HOST,
+            port=SERVER_PORT,
             debug=False,
             threaded=True,
-            ssl_context=('cert.pem', 'key.pem')
+            ssl_context=(SSL_CERT_PATH, SSL_KEY_PATH)
         )
     except KeyboardInterrupt:
         print("\nShutting down...")
