@@ -19,6 +19,7 @@ from config import (
     DEFAULT_CAMERA_WIDTH,
     DEFAULT_CAMERA_HEIGHT,
     DEFAULT_CAMERA_FPS,
+    CAMERA_DEVICE,
     SPEAKER_DEVICE,
     PULSE_SINK_NAME,
     PULSE_CAPTURE_SOURCE_NAME,
@@ -67,7 +68,7 @@ camera_settings = {
 camera_proc_lock = threading.Lock()
 
 print("\n" + "="*60)
-print("Raspberry Pi Surveillance System - Starting")
+print("Surveillance System - Starting")
 print("="*60 + "\n")
 
 pulseaudio_started_by_app = False
@@ -484,14 +485,20 @@ else:
     print("⚠ Audio playback pipeline will retry on first write")
 
 def start_camera(width, height, fps):
-    """Start rpicam-vid outputting MJPEG directly to stdout"""
+    """Start ffmpeg reading from a USB V4L2 device, outputting MJPEG to stdout"""
     try:
-        print(f"Starting camera pipeline (rpicam-vid mjpeg, {width}x{height} @ {fps}fps)...")
+        print(f"Starting camera pipeline (ffmpeg v4l2 mjpeg, {CAMERA_DEVICE}, {width}x{height} @ {fps}fps)...")
         proc = subprocess.Popen(
             [
-                'rpicam-vid', '-o', '-', '-t', '0',
-                '--width', str(width), '--height', str(height),
-                '--framerate', str(fps), '--codec', 'mjpeg'
+                'ffmpeg', '-loglevel', 'error',
+                '-f', 'v4l2',
+                '-input_format', 'mjpeg',
+                '-video_size', f'{width}x{height}',
+                '-framerate', str(fps),
+                '-i', CAMERA_DEVICE,
+                '-vcodec', 'copy',
+                '-f', 'mjpeg',
+                'pipe:1'
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

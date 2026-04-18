@@ -5,9 +5,9 @@ os.environ.setdefault('ALSA_CARD', 'default')
 
 VIDEO_ALLOWED_RESOLUTIONS = [
     (640, 480),
-    (1296, 972),
+    (1280, 720),
     (1920, 1080),
-    (2592, 1944),
+    (2560, 1440),
 ]
 VIDEO_MIN_FPS = 1
 VIDEO_MAX_FPS = 60
@@ -15,6 +15,7 @@ VIDEO_MAX_FPS = 60
 DEFAULT_CAMERA_WIDTH = int(os.environ.get('CAMERA_WIDTH', '1920'))
 DEFAULT_CAMERA_HEIGHT = int(os.environ.get('CAMERA_HEIGHT', '1080'))
 DEFAULT_CAMERA_FPS = int(os.environ.get('CAMERA_FPS', '25'))
+CAMERA_DEVICE = os.environ.get('CAMERA_DEVICE', '/dev/video0')
 
 if (DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT) not in VIDEO_ALLOWED_RESOLUTIONS:
     DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT = 1920, 1080
