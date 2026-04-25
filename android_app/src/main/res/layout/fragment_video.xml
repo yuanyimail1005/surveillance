@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".ui.fragments.VideoFragment">
+
+    <!-- Video Display -->
+    <ImageView
+        android:id="@+id/video_display"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/video_player_height"
+        android:contentDescription="@string/video_loading"
+        android:scaleType="centerCrop"
+        android:src="@android:drawable/ic_dialog_info" />
+
+    <!-- Loading Indicator -->
+    <com.google.android.material.progressindicator.CircularProgressIndicator
+        android:id="@+id/loading_spinner"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center" />
+
+    <!-- Control Panel -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="bottom"
+        android:orientation="vertical"
+        android:padding="@dimen/spacing_medium">
+
+        <!-- Audio Status -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="@dimen/spacing_medium"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:id="@+id/audio_status_icon"
+                android:layout_width="@dimen/icon_normal"
+                android:layout_height="@dimen/icon_normal"
+                android:contentDescription="@string/audio_status"
+                android:src="@android:drawable/ic_dialog_info" />
+
+            <TextView
+                android:id="@+id/audio_status_text"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_margin="@dimen/spacing_small"
+                android:layout_weight="1"
+                android:text="@string/audio_disabled"
+                android:textColor="@color/text_primary" />
+
+        </LinearLayout>
+
+        <!-- Talkback Button -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/talkback_button"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/button_height"
+            android:text="@string/talkback_button" />
+
+    </LinearLayout>
+
+</FrameLayout>

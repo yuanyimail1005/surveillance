@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pi Surveillance</string>
+
+    <!-- Navigation -->
+    <string name="nav_video">Video</string>
+    <string name="nav_settings">Settings</string>
+    <string name="nav_status">Status</string>
+
+    <!-- Video Fragment -->
+    <string name="video_loading">Loading video stream…</string>
+    <string name="video_error">Video stream error</string>
+    <string name="audio_disabled">Audio disabled</string>
+    <string name="talkback_button">Talkback</string>
+    <string name="talkback_recording">Recording…</string>
+
+    <!-- Settings Fragment -->
+    <string name="server_address">Server Address</string>
+    <string name="server_port">Port</string>
+    <string name="server_connect">Connect</string>
+    <string name="camera_device">Camera Device</string>
+    <string name="camera_resolution">Resolution</string>
+    <string name="camera_fps">Frame Rate</string>
+    <string name="apply_settings">Apply Settings</string>
+    <string name="speaker_volume">Speaker Volume</string>
+    <string name="capture_device">Microphone</string>
+    <string name="playback_device">Speaker</string>
+
+    <!-- Status Fragment -->
+    <string name="system_status">System Status</string>
+    <string name="camera_status">Camera</string>
+    <string name="audio_status">Audio</string>
+    <string name="connection_status">Connection Status</string>
+    <string name="running">Running</string>
+    <string name="stopped">Stopped</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+
+    <!-- Error Messages -->
+    <string name="error_connection_failed">Connection failed</string>
+    <string name="error_invalid_address">Invalid server address</string>
+    <string name="error_network_unavailable">Network unavailable</string>
+    <string name="error_stream_stopped">Stream stopped</string>
+
+    <!-- Permissions -->
+    <string name="permission_camera">Camera access required for video streaming</string>
+    <string name="permission_microphone">Microphone access required for talkback</string>
+
+    <!-- Buttons -->
+    <string name="button_ok">OK</string>
+    <string name="button_cancel">Cancel</string>
+    <string name="button_retry">Retry</string>
+
+    <!-- Camera Source Types -->
+    <string name="source_v4l2">V4L2</string>
+    <string name="source_csi">CSI</string>
+    <string name="source_unknown">Unknown</string>
+</resources>
