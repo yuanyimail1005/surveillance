@@ -14,6 +14,7 @@ RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ffmpeg \
+        pulseaudio \
         pulseaudio-utils \
         v4l-utils \
         ca-certificates; \
