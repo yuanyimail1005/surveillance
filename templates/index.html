@@ -205,6 +205,36 @@
             margin: 5px 0;
         }
 
+        .source-badge {
+            display: inline-block;
+            margin-left: 8px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.75em;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            vertical-align: middle;
+            border: 1px solid transparent;
+        }
+
+        .source-badge.v4l2 {
+            background: #e8f5ff;
+            color: #0b5c89;
+            border-color: #b8def6;
+        }
+
+        .source-badge.csi {
+            background: #eaf8ee;
+            color: #1f6b3a;
+            border-color: #bfe6cd;
+        }
+
+        .source-badge.unknown {
+            background: #f4f4f5;
+            color: #5f6368;
+            border-color: #d7d9dd;
+        }
+
         .debug-box {
             background: #f5f5f5;
             border: 1px solid #ddd;
@@ -405,6 +435,9 @@
         data-camera-width="{{ camera_width }}"
         data-camera-height="{{ camera_height }}"
         data-camera-fps="{{ camera_fps }}"
+        data-camera-device="{{ camera_device }}"
+        data-camera-device-preference="{{ camera_device_preference }}"
+        data-camera-source-type="{{ camera_source_type }}"
     >
         <h1>🎥 Raspberry Pi Surveillance System</h1>
 
@@ -438,6 +471,10 @@
                                 value="25"
                             >
                         </div>
+                    </div>
+                    <div style="margin-top:10px;">
+                        <label for="camera-device-path">📡 Camera Device Path</label>
+                        <select id="camera-device-path" class="rotation-select"></select>
                     </div>
                     <button id="apply-camera-settings-btn" class="btn-primary" style="margin-top:10px; min-width:0; width:100%;">
                         Apply Camera Settings
@@ -524,6 +561,10 @@
                     <h3>ℹ️ System Info</h3>
                     <div class="info-box">
                         <p id="video-info"><strong>Video:</strong> {{ camera_width }}x{{ camera_height }} @ {{ camera_fps }}fps</p>
+                        <p id="camera-device-info">
+                            <strong>Camera Device:</strong> {{ camera_device }}
+                            <span id="camera-source-badge" class="source-badge {{ camera_source_type | lower }}">{{ camera_source_type }}</span>
+                        </p>
                         <p><strong>Audio:</strong> 48000Hz Mono</p>
                         <p id="system-status"><strong>Status:</strong> Running ✓</p>
                     </div>
@@ -586,8 +627,11 @@
             width: Number(appContainer?.dataset.cameraWidth || 1920),
             height: Number(appContainer?.dataset.cameraHeight || 1080),
             fps: Number(appContainer?.dataset.cameraFps || 25),
+            devicePath: appContainer?.dataset.cameraDevicePreference || appContainer?.dataset.cameraDevice || '/dev/video0',
+            sourceType: appContainer?.dataset.cameraSourceType || 'Unknown',
             fpsMin: 1,
             fpsMax: 60,
+            availableDevices: [],
             allowedResolutions: [
                 { width: 640, height: 480 },
                 { width: 1280, height: 720 },
@@ -1420,6 +1464,26 @@
             updateVideoRatio(width, height);
         }
 
+        function updateCameraDeviceInfo(devicePath) {
+            const cameraDeviceInfo = document.getElementById('camera-device-info');
+            if (!cameraDeviceInfo) return;
+            const sourceBadge = document.getElementById('camera-source-badge');
+            const sourceBadgeHtml = sourceBadge ? sourceBadge.outerHTML : '';
+            cameraDeviceInfo.innerHTML = `<strong>Camera Device:</strong> ${devicePath || 'Unavailable'} ${sourceBadgeHtml}`;
+        }
+
+        function updateCameraSourceBadge(sourceType) {
+            const badge = document.getElementById('camera-source-badge');
+            if (!badge) return;
+
+            const normalized = String(sourceType || 'Unknown').toUpperCase();
+            const className = normalized === 'CSI' ? 'csi' : (normalized === 'V4L2' ? 'v4l2' : 'unknown');
+
+            badge.classList.remove('csi', 'v4l2', 'unknown');
+            badge.classList.add(className);
+            badge.textContent = normalized;
+        }
+
         function populateResolutionSelect(options, selectedWidth, selectedHeight) {
             const resolutionSelect = document.getElementById('camera-resolution');
             if (!resolutionSelect) return;
@@ -1439,6 +1503,39 @@
             }
         }
 
+        function populateCameraDeviceSelect(options, selectedPath) {
+            const deviceSelect = document.getElementById('camera-device-path');
+            if (!deviceSelect) return;
+
+            deviceSelect.innerHTML = '';
+            const deviceOptions = Array.isArray(options)
+                ? options.filter((device) => device && device.supported)
+                : [];
+
+            if (deviceOptions.length === 0) {
+                const fallbackOption = document.createElement('option');
+                fallbackOption.value = selectedPath || '';
+                fallbackOption.textContent = 'No supported camera devices found';
+                deviceSelect.appendChild(fallbackOption);
+                return;
+            }
+
+            deviceOptions.forEach((device) => {
+                const option = document.createElement('option');
+                option.value = device.path;
+                const baseName = device.name || device.path;
+                option.textContent = baseName;
+                deviceSelect.appendChild(option);
+            });
+
+            const hasSelected = deviceOptions.some((device) => device.path === selectedPath);
+            if (hasSelected) {
+                deviceSelect.value = selectedPath;
+            } else if (deviceOptions.length > 0) {
+                deviceSelect.value = deviceOptions[0].path;
+            }
+        }
+
         async function loadCameraSettings() {
             const status = document.getElementById('camera-settings-status');
             const fpsInput = document.getElementById('camera-fps');
@@ -1453,6 +1550,11 @@
                 cameraSettings.width = Number(data.width);
                 cameraSettings.height = Number(data.height);
                 cameraSettings.fps = Number(data.fps);
+                cameraSettings.devicePath = data.selected_camera_device || data.camera_device || cameraSettings.devicePath;
+                cameraSettings.sourceType = data.camera_source_type || cameraSettings.sourceType;
+                cameraSettings.availableDevices = Array.isArray(data.available_camera_devices)
+                    ? data.available_camera_devices
+                    : cameraSettings.availableDevices;
                 cameraSettings.allowedResolutions = Array.isArray(data.allowed_resolutions)
                     ? data.allowed_resolutions
                     : cameraSettings.allowedResolutions;
@@ -1464,6 +1566,10 @@
                     cameraSettings.width,
                     cameraSettings.height
                 );
+                populateCameraDeviceSelect(
+                    cameraSettings.availableDevices,
+                    cameraSettings.devicePath
+                );
 
                 if (fpsInput) {
                     fpsInput.min = String(cameraSettings.fpsMin);
@@ -1472,6 +1578,8 @@
                 }
 
                 updateVideoInfo(cameraSettings.width, cameraSettings.height, cameraSettings.fps);
+                updateCameraDeviceInfo(data.camera_device || cameraSettings.devicePath);
+                updateCameraSourceBadge(cameraSettings.sourceType);
                 if (status) {
                     status.textContent = 'Camera settings loaded';
                 }
@@ -1485,10 +1593,11 @@
         async function applyCameraSettings() {
             const resolutionSelect = document.getElementById('camera-resolution');
             const fpsInput = document.getElementById('camera-fps');
+            const deviceSelect = document.getElementById('camera-device-path');
             const status = document.getElementById('camera-settings-status');
             const applyBtn = document.getElementById('apply-camera-settings-btn');
 
-            if (!resolutionSelect || !fpsInput || !applyBtn) {
+            if (!resolutionSelect || !fpsInput || !applyBtn || !deviceSelect) {
                 return;
             }
 
@@ -1496,6 +1605,7 @@
             const width = Number(widthText);
             const height = Number(heightText);
             const fps = Number(fpsInput.value);
+            const cameraDevice = String(deviceSelect.value || '').trim();
 
             applyBtn.disabled = true;
             videoSettingsApplyInProgress = true;
@@ -1507,7 +1617,12 @@
                 const response = await fetch('/camera_settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ width, height, fps })
+                    body: JSON.stringify({
+                        width,
+                        height,
+                        fps,
+                        camera_device: cameraDevice
+                    })
                 });
                 const data = await response.json();
                 if (!response.ok || data.status !== 'ok') {
@@ -1517,10 +1632,14 @@
                 cameraSettings.width = Number(data.width);
                 cameraSettings.height = Number(data.height);
                 cameraSettings.fps = Number(data.fps);
+                cameraSettings.devicePath = data.camera_device || cameraDevice || cameraSettings.devicePath;
+                cameraSettings.sourceType = data.camera_source_type || cameraSettings.sourceType;
                 updateVideoInfo(cameraSettings.width, cameraSettings.height, cameraSettings.fps);
+                updateCameraDeviceInfo(cameraSettings.devicePath);
+                updateCameraSourceBadge(cameraSettings.sourceType);
 
                 if (status) {
-                    status.textContent = `Camera set to ${cameraSettings.width}x${cameraSettings.height} @ ${cameraSettings.fps}fps`;
+                    status.textContent = `Camera set to ${cameraSettings.width}x${cameraSettings.height} @ ${cameraSettings.fps}fps (${cameraSettings.devicePath})`;
                 }
 
                 // Keep the current socket alive; backend stream handling will recover during camera restart.
@@ -1712,6 +1831,8 @@
                 if (Number.isFinite(data.camera_width) && Number.isFinite(data.camera_height) && Number.isFinite(data.camera_fps)) {
                     updateVideoInfo(data.camera_width, data.camera_height, data.camera_fps);
                 }
+                updateCameraDeviceInfo(data.camera_device);
+                updateCameraSourceBadge(data.camera_source_type);
 
                 if (statusEl) {
                     const isHealthy = Boolean(data.camera) && Boolean(data.audio);

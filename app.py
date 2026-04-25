@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from flask_sock import Sock
+import os
 import subprocess
 import time
 import logging
@@ -65,6 +66,8 @@ camera_settings = {
     'height': DEFAULT_CAMERA_HEIGHT,
     'fps': DEFAULT_CAMERA_FPS,
 }
+active_camera_device = None
+camera_device_preference = CAMERA_DEVICE
 camera_proc_lock = threading.Lock()
 
 print("\n" + "="*60)
@@ -484,26 +487,236 @@ if start_pulse_process():
 else:
     print("⚠ Audio playback pipeline will retry on first write")
 
-def start_camera(width, height, fps):
-    """Start ffmpeg reading from a USB V4L2 device, outputting MJPEG to stdout"""
+def _video_device_sort_key(device_path):
+    match = re.search(r'(\d+)$', device_path)
+    if match:
+        return int(match.group(1))
+    return float('inf')
+
+def _iter_camera_device_candidates(preferred_device=None):
+    candidates = []
+    if preferred_device:
+        candidates.append(preferred_device)
+    candidates.extend(sorted(glob.glob('/dev/video*'), key=_video_device_sort_key))
+
+    seen = set()
+    for device_path in candidates:
+        if not device_path or device_path in seen:
+            continue
+        seen.add(device_path)
+        yield device_path
+
+def _parse_rpicam_path(camera_path):
+    match = re.match(r'^rpicam://(\d+)$', str(camera_path or '').strip())
+    if not match:
+        return None
+    return match.group(1)
+
+def get_camera_source_type(camera_path):
+    if _parse_rpicam_path(camera_path) is not None:
+        return 'CSI'
+    if str(camera_path or '').startswith('/dev/video'):
+        return 'V4L2'
+    return 'Unknown'
+
+def _is_supported_v4l2_camera(device_path):
+    if not os.path.exists(device_path):
+        return False, 'device node missing'
+
+    if shutil.which('v4l2-ctl') is None:
+        return True, 'v4l2-ctl unavailable; using existing device node'
+
+    caps_result = subprocess.run(
+        ['v4l2-ctl', '-d', device_path, '--all'],
+        capture_output=True,
+        text=True
+    )
+    if caps_result.returncode != 0:
+        return False, 'v4l2 query failed'
+
+    caps_text = caps_result.stdout.lower()
+    if 'metadata capture' in caps_text and 'video capture' not in caps_text:
+        return False, 'metadata-only endpoint'
+    if 'video capture' not in caps_text:
+        return False, 'not a video capture endpoint'
+
+    formats_result = subprocess.run(
+        ['v4l2-ctl', '-d', device_path, '--list-formats-ext'],
+        capture_output=True,
+        text=True
+    )
+    if formats_result.returncode != 0:
+        return False, 'format enumeration failed'
+
+    formats_text = formats_result.stdout.lower()
+    if 'mjpg' not in formats_text and 'motion-jpeg' not in formats_text:
+        return False, 'mjpeg not supported'
+
+    return True, 'video capture with mjpeg support'
+
+def _discover_rpicam_cameras():
+    if shutil.which('rpicam-hello') is None:
+        return []
+
     try:
-        print(f"Starting camera pipeline (ffmpeg v4l2 mjpeg, {CAMERA_DEVICE}, {width}x{height} @ {fps}fps)...")
-        proc = subprocess.Popen(
-            [
-                'ffmpeg', '-loglevel', 'error',
-                '-f', 'v4l2',
-                '-input_format', 'mjpeg',
-                '-video_size', f'{width}x{height}',
-                '-framerate', str(fps),
-                '-i', CAMERA_DEVICE,
-                '-vcodec', 'copy',
-                '-f', 'mjpeg',
-                'pipe:1'
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=10**6
+        result = subprocess.run(
+            ['rpicam-hello', '--list-cameras'],
+            capture_output=True,
+            text=True,
+            timeout=4
         )
+        if result.returncode != 0:
+            return []
+
+        cameras = []
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            match = re.match(r'^(\d+)\s*:\s*(.+)$', line)
+            if not match:
+                continue
+            cameras.append({
+                'index': match.group(1),
+                'descriptor': match.group(2),
+            })
+        return cameras
+    except Exception:
+        return []
+
+def _is_supported_rpicam_camera(camera_path):
+    camera_index = _parse_rpicam_path(camera_path)
+    if camera_index is None:
+        return False, 'invalid rpicam path'
+
+    if shutil.which('rpicam-vid') is None:
+        return False, 'rpicam-vid command not found'
+
+    cameras = _discover_rpicam_cameras()
+    if not cameras:
+        return False, 'no CSI cameras reported by rpicam-hello'
+
+    available_indexes = {camera['index'] for camera in cameras}
+    if camera_index not in available_indexes:
+        return False, f'CSI camera index {camera_index} not found'
+
+    return True, 'CSI camera via rpicam-vid mjpeg stream'
+
+def resolve_camera_device(preferred_device=None):
+    """Resolve preferred camera path, defaulting to V4L2 MJPEG auto-detection."""
+    preferred = preferred_device or CAMERA_DEVICE
+
+    if _parse_rpicam_path(preferred) is not None:
+        supported, reason = _is_supported_rpicam_camera(preferred)
+        if supported:
+            print(f'✓ Selected camera device {preferred} ({reason})')
+            return preferred
+        print(f'⚙ Skipping camera device {preferred} ({reason})')
+    elif preferred:
+        supported, reason = _is_supported_v4l2_camera(preferred)
+        if supported:
+            print(f'✓ Selected camera device {preferred} ({reason})')
+            return preferred
+        print(f'⚙ Skipping camera device {preferred} ({reason})')
+
+    for device_path in _iter_camera_device_candidates(None):
+        supported, reason = _is_supported_v4l2_camera(device_path)
+        if supported:
+            print(f'✓ Selected camera device {device_path} ({reason})')
+            return device_path
+        print(f'⚙ Skipping camera device {device_path} ({reason})')
+
+    for csi_camera in list_rpicam_camera_options():
+        if csi_camera['supported']:
+            print(f"✓ Selected camera device {csi_camera['path']} ({csi_camera['reason']})")
+            return csi_camera['path']
+
+    print('✗ No usable camera source found (V4L2 MJPEG or CSI rpicam)')
+    return None
+
+def list_rpicam_camera_options():
+    """List CSI cameras discovered via rpicam-hello for UI selection."""
+    options = []
+    for camera in _discover_rpicam_cameras():
+        path = f"rpicam://{camera['index']}"
+        supported, reason = _is_supported_rpicam_camera(path)
+        options.append({
+            'path': path,
+            'name': f"CSI Camera {camera['index']}: {camera['descriptor']}",
+            'supported': supported,
+            'reason': reason,
+        })
+    return options
+
+def list_camera_device_options(selected_device=None):
+    """List selectable camera paths supported by current stream pipeline."""
+    selected = selected_device or camera_device_preference or active_camera_device or CAMERA_DEVICE
+    options = []
+    for device_path in _iter_camera_device_candidates(selected):
+        supported, reason = _is_supported_v4l2_camera(device_path)
+        if supported:
+            options.append({
+                'path': device_path,
+                'name': device_path,
+                'supported': True,
+                'reason': reason,
+            })
+
+    options.extend([option for option in list_rpicam_camera_options() if option['supported']])
+    return options
+
+def start_camera(width, height, fps):
+    """Start camera pipeline and output MJPEG bytes to stdout."""
+    global active_camera_device
+
+    try:
+        resolved_camera_device = resolve_camera_device(camera_device_preference or active_camera_device or CAMERA_DEVICE)
+        if resolved_camera_device is None:
+            print('✗ Camera failed: no usable camera device found\n')
+            return None
+
+        camera_index = _parse_rpicam_path(resolved_camera_device)
+        if camera_index is not None:
+            print(
+                f"Starting camera pipeline (rpicam-vid mjpeg, camera {camera_index}, "
+                f"{width}x{height} @ {fps}fps)..."
+            )
+            proc = subprocess.Popen(
+                [
+                    'rpicam-vid',
+                    '--camera', str(camera_index),
+                    '--codec', 'mjpeg',
+                    '--width', str(width),
+                    '--height', str(height),
+                    '--framerate', str(fps),
+                    '--timeout', '0',
+                    '--nopreview',
+                    '--output', '-'
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=10**6
+            )
+        else:
+            print(
+                f"Starting camera pipeline (ffmpeg v4l2 mjpeg, {resolved_camera_device}, "
+                f"{width}x{height} @ {fps}fps)..."
+            )
+            proc = subprocess.Popen(
+                [
+                    'ffmpeg', '-loglevel', 'error',
+                    '-f', 'v4l2',
+                    '-input_format', 'mjpeg',
+                    '-video_size', f'{width}x{height}',
+                    '-framerate', str(fps),
+                    '-i', resolved_camera_device,
+                    '-vcodec', 'copy',
+                    '-f', 'mjpeg',
+                    'pipe:1'
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=10**6
+            )
+        active_camera_device = resolved_camera_device
         print(f"✓ Camera pipeline started (PID: {proc.pid})\n")
         return proc
     except Exception as e:
@@ -529,10 +742,15 @@ def _normalize_camera_settings(width, height, fps):
 
 def restart_camera_process(new_settings):
     """Restart camera process with new settings."""
-    global camera_proc
+    global camera_proc, camera_device_preference
 
     with camera_proc_lock:
         previous_settings = dict(camera_settings)
+        previous_device_preference = camera_device_preference
+
+        requested_device_preference = new_settings.pop('camera_device', None)
+        if requested_device_preference is not None:
+            camera_device_preference = requested_device_preference
 
         if camera_proc is not None:
             try:
@@ -555,6 +773,7 @@ def restart_camera_process(new_settings):
 
         if new_proc is None:
             camera_settings.update(previous_settings)
+            camera_device_preference = previous_device_preference
             return False
 
         camera_proc = new_proc
@@ -628,6 +847,7 @@ audio_proc = start_audio()
 
 @app.route('/')
 def index():
+    selected_camera_device = active_camera_device or camera_device_preference or CAMERA_DEVICE
     return render_template(
         'index.html',
         talkback_highpass_hz=TALKBACK_HIGHPASS_HZ,
@@ -640,6 +860,9 @@ def index():
         camera_width=camera_settings['width'],
         camera_height=camera_settings['height'],
         camera_fps=camera_settings['fps'],
+        camera_device=active_camera_device or CAMERA_DEVICE,
+        camera_device_preference=camera_device_preference,
+        camera_source_type=get_camera_source_type(selected_camera_device),
     )
 
 @sock.route('/video_feed')
@@ -842,6 +1065,7 @@ def set_speaker_volume():
 
 @app.route('/camera_settings', methods=['GET'])
 def get_camera_settings():
+    selected_camera_device = active_camera_device or camera_device_preference or CAMERA_DEVICE
     allowed = [
         {'width': width, 'height': height}
         for width, height in VIDEO_ALLOWED_RESOLUTIONS
@@ -851,6 +1075,10 @@ def get_camera_settings():
         'width': camera_settings['width'],
         'height': camera_settings['height'],
         'fps': camera_settings['fps'],
+        'camera_device': active_camera_device,
+        'selected_camera_device': selected_camera_device,
+        'camera_source_type': get_camera_source_type(selected_camera_device),
+        'available_camera_devices': list_camera_device_options(selected_camera_device),
         'allowed_resolutions': allowed,
         'fps_range': {
             'min': VIDEO_MIN_FPS,
@@ -861,6 +1089,28 @@ def get_camera_settings():
 @app.route('/camera_settings', methods=['POST'])
 def set_camera_settings():
     payload = request.get_json(silent=True) or {}
+    requested_camera_device = payload.get('camera_device')
+
+    if requested_camera_device is not None:
+        requested_camera_device = str(requested_camera_device).strip()
+        if not requested_camera_device:
+            return jsonify({'status': 'error', 'message': 'camera_device cannot be empty'}), 400
+
+        available_camera_options = {
+            option['path']: option for option in list_camera_device_options(requested_camera_device)
+        }
+        selected_option = available_camera_options.get(requested_camera_device)
+        if selected_option is None:
+            return jsonify({
+                'status': 'error',
+                'message': f'Invalid camera device path: {requested_camera_device}'
+            }), 400
+        if not selected_option.get('supported', False):
+            return jsonify({
+                'status': 'error',
+                'message': f'Selected camera path is unsupported: {requested_camera_device}'
+            }), 400
+
     normalized, error = _normalize_camera_settings(
         payload.get('width'),
         payload.get('height'),
@@ -869,12 +1119,24 @@ def set_camera_settings():
     if error:
         return jsonify({'status': 'error', 'message': error}), 400
 
-    if normalized == camera_settings:
+    if requested_camera_device is not None:
+        normalized['camera_device'] = requested_camera_device
+
+    current_selected_camera = active_camera_device or camera_device_preference or CAMERA_DEVICE
+    camera_device_changed = (
+        requested_camera_device is not None and
+        requested_camera_device != current_selected_camera
+    )
+
+    if normalized == camera_settings and not camera_device_changed:
+        resolved_camera_device = active_camera_device or current_selected_camera
         return jsonify({
             'status': 'ok',
             'width': camera_settings['width'],
             'height': camera_settings['height'],
             'fps': camera_settings['fps'],
+            'camera_device': resolved_camera_device,
+            'camera_source_type': get_camera_source_type(resolved_camera_device),
             'message': 'Camera settings unchanged'
         })
 
@@ -888,16 +1150,22 @@ def set_camera_settings():
         'status': 'ok',
         'width': camera_settings['width'],
         'height': camera_settings['height'],
-        'fps': camera_settings['fps']
+        'fps': camera_settings['fps'],
+        'camera_device': active_camera_device,
+        'camera_source_type': get_camera_source_type(active_camera_device)
     })
 
 @app.route('/status')
 def status():
     speaker_volume, speaker_control = _get_speaker_volume_percent()
+    selected_camera_device = active_camera_device or camera_device_preference or CAMERA_DEVICE
     return jsonify({
         'camera': camera_proc is not None and camera_proc.poll() is None,
         'audio': audio_proc is not None and audio_proc.poll() is None,
         'queue_size': 0,
+        'camera_device': selected_camera_device,
+        'camera_source_type': get_camera_source_type(selected_camera_device),
+        'camera_device_preference': camera_device_preference,
         'camera_width': camera_settings['width'],
         'camera_height': camera_settings['height'],
         'camera_fps': camera_settings['fps'],
