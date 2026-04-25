@@ -1,0 +1,36 @@
+services:
+  surveillance:
+    container_name: surveillance
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: surveillance:latest
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    environment:
+      SERVER_HOST: ${SERVER_HOST:-0.0.0.0}
+      SERVER_PORT: ${SERVER_PORT:-5000}
+      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
+      CAMERA_WIDTH: ${CAMERA_WIDTH:-1920}
+      CAMERA_HEIGHT: ${CAMERA_HEIGHT:-1080}
+      CAMERA_FPS: ${CAMERA_FPS:-25}
+      PULSE_SINK_NAME: ${PULSE_SINK_NAME:-@DEFAULT_SINK@}
+      PULSE_CAPTURE_SOURCE_NAME: ${PULSE_CAPTURE_SOURCE_NAME:-@DEFAULT_SOURCE@}
+      PULSE_ECHO_CANCEL_ENABLED: ${PULSE_ECHO_CANCEL_ENABLED:-true}
+      PULSE_ECHO_CANCEL_AEC_METHOD: ${PULSE_ECHO_CANCEL_AEC_METHOD:-webrtc}
+      AUDIO_PLAYER_NICE: ${AUDIO_PLAYER_NICE:-0}
+      TALKBACK_PLAYBACK_GAIN: ${TALKBACK_PLAYBACK_GAIN:-5.0}
+      SSL_CERT_PATH: /app/cert.pem
+      SSL_KEY_PATH: /app/key.pem
+    volumes:
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
+      - /dev:/dev
+      - /dev/snd:/dev/snd
+      - /run/udev:/run/udev:ro
+    devices:
+      - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
+    group_add:
+      - audio
+      - video

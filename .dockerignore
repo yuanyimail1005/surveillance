@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+*.log
+venv/
+.git/
+.gitignore
+cert.pem
+key.pem
+*.pem
