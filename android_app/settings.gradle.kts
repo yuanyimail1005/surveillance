@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Pi Surveillance"
-include ":app"
+include(":app")
