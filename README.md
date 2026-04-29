@@ -3,56 +3,79 @@ a surveillance system with camera, speaker and microphone on raspberry pi
 
 ## Docker
 
-### Build
+The recommended way to run the app is with Docker Compose. The image is built on
+`vascoguita/raspios:latest` (arm64 Raspberry Pi OS), which includes `rpicam-apps`
+for CSI camera support alongside V4L2/USB cameras.
 
-```bash
-sudo docker build -t surveillance:latest .
-```
+### Prerequisites
 
-### Run
+- Docker and Docker Compose installed on the Raspberry Pi host.
+- An HTTPS certificate and key at `cert.pem` / `key.pem` in the project root.
+  Generate a self-signed pair if needed:
+  ```bash
+  openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 3650 -nodes -subj '/CN=localhost'
+  ```
 
-The app expects camera/audio devices from the host and HTTPS cert files.
+### Configuration
 
-```bash
-sudo docker run --rm -it \
-	--name surveillance \
-	--network host \
-	--device /dev/video0 \
-	-v /dev/snd:/dev/snd \
-	-v "$(pwd)/cert.pem:/app/cert.pem:ro" \
-	-v "$(pwd)/key.pem:/app/key.pem:ro" \
-	surveillance:latest
-```
-
-Notes:
-- If your camera is not `/dev/video0`, pass the correct device node (for example `/dev/video8`).
-- CSI camera support via `rpicam-vid` requires a Raspberry Pi host environment with `rpicam-apps` support.
-
-### Docker Compose
-
-Copy the example environment file and adjust it if needed:
+Copy the example environment file and edit values to match your hardware:
 
 ```bash
 cp .env.example .env
 ```
 
-Build and start with Compose:
+Key variables in `.env`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SERVER_PORT` | `5000` | HTTPS port the server listens on |
+| `CAMERA_DEVICE` | `/dev/video0` | Default V4L2 device (app also auto-detects) |
+| `CAMERA_WIDTH` / `CAMERA_HEIGHT` | `1920` / `1080` | Default capture resolution |
+| `CAMERA_FPS` | `25` | Default capture frame rate |
+| `PULSE_ECHO_CANCEL_ENABLED` | `true` | Enable WebRTC echo cancellation |
+| `TALKBACK_PLAYBACK_GAIN` | `5.0` | Talkback audio gain |
+
+### Build
+
+Build the image (required once and after any code changes):
 
 ```bash
-sudo docker compose up --build
+sudo docker compose build surveillance
 ```
 
-Run detached:
+### Start
+
+Run the container in the background:
 
 ```bash
-sudo docker compose up -d --build
+sudo docker compose up -d surveillance
 ```
 
-Stop the service:
+### Stop
 
 ```bash
 sudo docker compose down
 ```
+
+### Restart
+
+```bash
+sudo docker compose restart surveillance
+```
+
+### Logs
+
+Stream live logs from the running container:
+
+```bash
+sudo docker compose logs -f surveillance
+```
+
+### Notes
+
+- The container uses `network_mode: host`, so the app binds directly to port `5000` on the host — ensure no other process is using that port before starting.
+- CSI camera (`rpicam://0`) is auto-detected when `rpicam-vid` is available inside the container. USB/V4L2 cameras are also auto-detected via `v4l2-ctl`.
+- Only one Gunicorn worker is used to prevent duplicate camera/audio pipelines being opened at module import time.
 
 ## Android App
 
