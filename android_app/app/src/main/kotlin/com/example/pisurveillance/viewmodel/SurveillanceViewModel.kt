@@ -36,6 +36,9 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private val _serverPort = MutableLiveData(5000)
     val serverPort: LiveData<Int> = _serverPort
 
+    private val _recentServers = MutableLiveData<List<String>>(emptyList())
+    val recentServers: LiveData<List<String>> = _recentServers
+
     private val _isConnected = MutableLiveData(false)
     val isConnected: LiveData<Boolean> = _isConnected
 
@@ -88,6 +91,7 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                 val savedPort = preferencesManager.getServerPort()
                 _serverAddress.value = savedAddress
                 _serverPort.value = savedPort
+                _recentServers.value = preferencesManager.getRecentServers()
                 val url = cleanUrl(savedAddress, savedPort)
                 _serverUrl.value = url
 
@@ -343,9 +347,11 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                 val cleanAddress = address.replace(Regex("^https?://"), "").trimEnd('/').split(":")[0]
                 preferencesManager.setServerAddress(cleanAddress)
                 preferencesManager.setServerPort(port)
+                preferencesManager.addRecentServer(cleanAddress)
                 
                 _serverAddress.postValue(cleanAddress)
                 _serverPort.postValue(port)
+                _recentServers.postValue(preferencesManager.getRecentServers())
                 
                 val url = "https://$cleanAddress:$port"
                 _serverUrl.postValue(url)

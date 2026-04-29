@@ -35,6 +35,10 @@
     <string name="stopped">Stopped</string>
     <string name="connected">Connected</string>
     <string name="disconnected">Disconnected</string>
+    <string name="device_label">Device:</string>
+    <string name="resolution_label">Resolution:</string>
+    <string name="fps_label">FPS:</string>
+    <string name="refresh_status">Refresh status</string>
 
     <!-- Error Messages -->
     <string name="error_connection_failed">Connection failed</string>

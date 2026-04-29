@@ -32,6 +32,26 @@ class PreferencesManager(private val context: Context) {
         private val LAST_CAPTURE_DEVICE = stringPreferencesKey("last_capture_device")
         private val LAST_PLAYBACK_DEVICE = stringPreferencesKey("last_playback_device")
         private val TALKBACK_ENABLED = booleanPreferencesKey("talkback_enabled")
+        private val RECENT_SERVERS = stringPreferencesKey("recent_servers")
+    }
+
+    // Recent Servers
+    suspend fun getRecentServers(): List<String> {
+        val serversString = context.dataStore.data.map { prefs ->
+            prefs[RECENT_SERVERS] ?: ""
+        }.first()
+        return if (serversString.isEmpty()) emptyList() else serversString.split(",")
+    }
+
+    suspend fun addRecentServer(address: String) {
+        if (address.isEmpty()) return
+        val currentServers = getRecentServers().toMutableList()
+        currentServers.remove(address) // Remove if already exists to move to top
+        currentServers.add(0, address)
+        val limitedServers = currentServers.take(5)
+        context.dataStore.edit { prefs ->
+            prefs[RECENT_SERVERS] = limitedServers.joinToString(",")
+        }
     }
 
     // Server configuration

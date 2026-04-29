@@ -58,6 +58,15 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        viewModel?.recentServers?.observe(viewLifecycleOwner) { servers ->
+            val adapter = ArrayAdapter(requireContext(), R.layout.list_item_dropdown, servers)
+            binding.serverAddressInput.setAdapter(adapter)
+        }
+
+        binding.serverAddressInput.setOnClickListener {
+            binding.serverAddressInput.showDropDown()
+        }
+
         binding.connectButton.setOnClickListener {
             val address = binding.serverAddressInput.text.toString()
             val port = binding.serverPortInput.text.toString().toIntOrNull() ?: 5000

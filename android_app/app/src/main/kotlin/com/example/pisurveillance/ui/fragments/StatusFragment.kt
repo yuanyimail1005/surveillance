@@ -41,6 +41,13 @@ class StatusFragment : Fragment() {
         observeSystemStatus()
         observeCameraInfo()
 
+        binding.refreshStatusButton.setOnClickListener {
+            it.animate().rotationBy(360f).setDuration(500).start()
+            lifecycleScope.launch {
+                viewModel?.fetchServerStatus()
+            }
+        }
+
         // Refresh status periodically
         lifecycleScope.launch {
             while (true) {
