@@ -11,6 +11,7 @@ import shutil
 import threading
 import struct
 import re
+import queue
 import werkzeug.serving
 
 from config import (
@@ -282,6 +283,7 @@ def restart_audio_capture_process():
                     pass
             audio_proc = None
         audio_proc = start_audio()
+        audio_broadcaster.set_proc(audio_proc)
         return audio_proc is not None
 
 def ensure_audio_capture_process_running():
@@ -293,6 +295,7 @@ def ensure_audio_capture_process_running():
             return True
         print('⚙ Audio capture process not running, restarting...')
         audio_proc = start_audio()
+        audio_broadcaster.set_proc(audio_proc)
         return audio_proc is not None
 
 def ensure_pulseaudio_daemon_running():
@@ -777,6 +780,7 @@ def restart_camera_process(new_settings):
             return False
 
         camera_proc = new_proc
+        video_broadcaster.set_proc(camera_proc)
 
     return True
 
@@ -793,6 +797,7 @@ def ensure_camera_process_running():
             camera_settings['height'],
             camera_settings['fps']
         )
+        video_broadcaster.set_proc(camera_proc)
         return camera_proc is not None
 
 def start_audio():
@@ -837,6 +842,105 @@ def start_audio():
         print(f"⚠ Audio failed: {e}\n")
         return None
 
+
+class FrameBroadcaster:
+    """
+    One background thread continuously drains a subprocess stdout and
+    distributes frames to all subscribed WebSocket handlers via per-client
+    queues.  Keeps the pipe drained even when no clients are connected so
+    the producer process never blocks.
+    """
+
+    def __init__(self, name, read_frames_fn):
+        self.name = name
+        self._read_frames = read_frames_fn
+        self._lock = threading.Lock()
+        self._subscribers = {}  # token_id -> queue.Queue
+        self._proc = None
+        t = threading.Thread(target=self._run, daemon=True, name=f'broadcaster-{name}')
+        t.start()
+
+    def set_proc(self, proc):
+        """Notify the broadcaster that a new subprocess is now the source."""
+        with self._lock:
+            self._proc = proc
+
+    def subscribe(self):
+        """Return (token, queue). Caller must call unsubscribe(token) when done."""
+        token = object()
+        q = queue.Queue(maxsize=30)
+        with self._lock:
+            self._subscribers[id(token)] = q
+        return token, q
+
+    def unsubscribe(self, token):
+        with self._lock:
+            self._subscribers.pop(id(token), None)
+
+    def _broadcast(self, frame):
+        with self._lock:
+            queues = list(self._subscribers.values())
+        for q in queues:
+            try:
+                q.put_nowait(frame)
+            except queue.Full:
+                pass  # slow client: drop frame rather than block
+
+    def _run(self):
+        while True:
+            with self._lock:
+                proc = self._proc
+            if proc is None or proc.poll() is not None or proc.stdout is None:
+                time.sleep(0.05)
+                continue
+            try:
+                for frame in self._read_frames(proc):
+                    with self._lock:
+                        current_proc = self._proc
+                    if current_proc is not proc:
+                        break  # proc was replaced; restart outer loop
+                    self._broadcast(frame)
+            except Exception as e:
+                print(f'[{self.name}] reader error: {e}')
+                time.sleep(0.05)
+
+
+def _video_frames_gen(proc):
+    """Yield complete MJPEG frames from a subprocess stdout."""
+    buf = b''
+    while True:
+        try:
+            chunk = proc.stdout.read(4096)
+        except (OSError, ValueError):
+            return
+        if not chunk:
+            return
+        buf += chunk
+        while True:
+            start = buf.find(b'\xff\xd8')
+            if start == -1:
+                buf = b''
+                break
+            end = buf.find(b'\xff\xd9', start + 2)
+            if end == -1:
+                buf = buf[start:]
+                break
+            yield buf[start:end + 2]
+            buf = buf[end + 2:]
+
+
+def _audio_chunks_gen(proc):
+    """Yield raw PCM chunks from a subprocess stdout."""
+    while True:
+        try:
+            chunk = proc.stdout.read(4096)
+        except (OSError, ValueError):
+            return
+        if not chunk:
+            return
+        yield chunk
+
+
 # Start processes
 camera_proc = start_camera(
     camera_settings['width'],
@@ -844,6 +948,11 @@ camera_proc = start_camera(
     camera_settings['fps']
 )
 audio_proc = start_audio()
+
+video_broadcaster = FrameBroadcaster('video', _video_frames_gen)
+audio_broadcaster = FrameBroadcaster('audio', _audio_chunks_gen)
+video_broadcaster.set_proc(camera_proc)
+audio_broadcaster.set_proc(audio_proc)
 
 @app.route('/')
 def index():
@@ -867,86 +976,59 @@ def index():
 
 @sock.route('/video_feed')
 def video_feed_socket(ws):
-    """Stream JPEG frames over WebSocket from camera stdout."""
-    global camera_proc
+    """Stream JPEG frames over WebSocket from the shared camera broadcaster."""
     if not ensure_camera_process_running():
         print('📹 Video socket: camera not available')
         return
 
     print('📹 Video socket connected')
-    buffer = b''
+    token, q = video_broadcaster.subscribe()
     try:
         while True:
-            proc = camera_proc
-            if proc is None or proc.poll() is not None or proc.stdout is None:
-                if not ensure_camera_process_running():
-                    print('📹 Video socket: camera unavailable after restart attempt')
-                    break
-                time.sleep(0.02)
-                continue
-
             try:
-                chunk = proc.stdout.read(4096)
-            except (OSError, ValueError) as read_error:
-                print(f'📹 Video socket: camera stream read interrupted ({read_error}), retrying...')
-                time.sleep(0.02)
+                frame = q.get(timeout=5.0)
+            except queue.Empty:
+                if camera_proc is None or camera_proc.poll() is not None:
+                    if not ensure_camera_process_running():
+                        print('📹 Video socket: camera unavailable after restart attempt')
+                        break
                 continue
-            if not chunk:
-                time.sleep(0.01)
-                continue
-            buffer += chunk
-
-            while True:
-                start = buffer.find(b'\xff\xd8')
-                if start == -1:
-                    break
-                end = buffer.find(b'\xff\xd9', start + 2)
-                if end == -1:
-                    break
-
-                jpg = buffer[start:end + 2]
-                buffer = buffer[end + 2:]
-                ws.send(jpg)
+            ws.send(frame)
     except Exception as e:
         print(f'📹 Video socket closed: {e}')
     finally:
+        video_broadcaster.unsubscribe(token)
         print('📹 Video socket disconnected')
 
 
 @sock.route('/audio_feed')
 def audio_feed_socket(ws):
-    """Stream mono microphone PCM over WebSocket."""
-    global audio_proc
+    """Stream mono microphone PCM over WebSocket from the shared audio broadcaster."""
     if not ensure_audio_capture_process_running():
         print('🎤 Audio socket: audio process not available after restart attempt')
         return
 
     print('🎤 Audio socket connected')
+    token, q = audio_broadcaster.subscribe()
+    chunk_count = 0
     try:
-        chunk_count = 0
-        empty_reads = 0
         while True:
-            chunk = audio_proc.stdout.read(4096)
-            if not chunk:
-                empty_reads += 1
-                if ensure_audio_capture_process_running():
-                    if empty_reads % 20 == 0:
-                        print('🎤 Audio socket: waiting for capture data after restart...')
-                    time.sleep(0.02)
-                    continue
-                print('🎤 Audio socket: End of stream')
-                break
-
-            empty_reads = 0
-
+            try:
+                chunk = q.get(timeout=5.0)
+            except queue.Empty:
+                if audio_proc is None or audio_proc.poll() is not None:
+                    if not ensure_audio_capture_process_running():
+                        print('🎤 Audio socket: audio unavailable after restart attempt')
+                        break
+                continue
             chunk_count += 1
             if chunk_count % 50 == 0:
                 print(f'🎤 Audio socket: sent chunk {chunk_count} ({len(chunk)} bytes)')
-
             ws.send(chunk)
     except Exception as e:
         print(f'🎤 Audio socket closed: {e}')
     finally:
+        audio_broadcaster.unsubscribe(token)
         print('🎤 Audio socket disconnected')
 
 def convert_mono_to_stereo(mono_data):

@@ -1,0 +1,217 @@
+nohup: ignoring input
+
+============================================================
+Surveillance System - Starting
+============================================================
+
+
+=== Detecting Audio Devices ===
+
+✓ PulseAudio daemon already running
+[DEBUG] LADSPA chaining: source_master=alsa_input.usb-SmartIC_V20_00142204022019000-00.analog-stereo, sink_master=alsa_output.usb-HHWei_Technology_Co.__Ltd._V20_HHW001-02.analog-stereo
+✓ PulseAudio echo cancel enabled (source=surveillance_ec_source, sink=surveillance_ec_sink, method=webrtc)
+Using microphone source: surveillance_ec_source
+Using speaker sink: surveillance_ec_sink
+
+✓ PulseAudio stdin pipeline started (PID: 79354, sink: surveillance_ec_sink)
+🎵 Direct audio write mode enabled (no intermediate queue)
+⚙ Skipping camera device /dev/video0 (mjpeg not supported)
+⚙ Skipping camera device /dev/video0 (mjpeg not supported)
+⚙ Skipping camera device /dev/video1 (mjpeg not supported)
+⚙ Skipping camera device /dev/video2 (mjpeg not supported)
+⚙ Skipping camera device /dev/video3 (mjpeg not supported)
+⚙ Skipping camera device /dev/video4 (mjpeg not supported)
+⚙ Skipping camera device /dev/video5 (mjpeg not supported)
+⚙ Skipping camera device /dev/video6 (mjpeg not supported)
+⚙ Skipping camera device /dev/video7 (mjpeg not supported)
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1920x1080 @ 25fps)...
+✓ Camera pipeline started (PID: 79375)
+
+Starting audio recording from PulseAudio source (surveillance_ec_source)...
+✓ Audio recording started (PulseAudio echo-cancel source, Mono, 48000Hz)
+
+Server: https://0.0.0.0:5000
+
+ * Serving Flask app 'app'
+ * Debug mode: off
+44.220.188.26 - - [28/Apr/2026 18:25:59] SSL error occurred: [SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] ssl/tls alert handshake failure (_ssl.c:2649)
+📹 Video socket connected
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1280x720 @ 25fps)...
+✓ Camera pipeline started (PID: 79765)
+
+📹 Video socket connected
+🎤 Audio socket connected
+🎤 Audio socket: sent chunk 50 (4096 bytes)
+🎤 Audio socket: sent chunk 100 (4096 bytes)
+🎤 Audio socket: sent chunk 150 (4096 bytes)
+🎤 Audio socket: sent chunk 200 (4096 bytes)
+🎤 Audio socket: sent chunk 250 (4096 bytes)
+🎤 Audio socket: sent chunk 300 (4096 bytes)
+🎤 Audio socket: sent chunk 350 (4096 bytes)
+🎤 Audio socket: sent chunk 400 (4096 bytes)
+🎤 Audio socket: sent chunk 450 (4096 bytes)
+🎤 Audio socket: sent chunk 500 (4096 bytes)
+🎤 Audio socket: sent chunk 550 (4096 bytes)
+🎤 Audio socket: sent chunk 600 (4096 bytes)
+🎤 Audio socket: sent chunk 650 (4096 bytes)
+🎤 Audio socket: sent chunk 700 (4096 bytes)
+🎤 Audio socket: sent chunk 750 (4096 bytes)
+🎤 Audio socket: sent chunk 800 (4096 bytes)
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1920x1080 @ 25fps)...
+✓ Camera pipeline started (PID: 80056)
+
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1920x1080 @ 25fps)...
+✓ Camera pipeline started (PID: 80153)
+
+🎤 Audio socket: sent chunk 850 (4096 bytes)
+🎤 Audio socket: sent chunk 900 (4096 bytes)
+🎤 Audio socket: sent chunk 950 (4096 bytes)
+🎤 Audio socket: sent chunk 1000 (4096 bytes)
+🎤 Audio socket: sent chunk 1050 (4096 bytes)
+🎤 Audio socket: sent chunk 1100 (4096 bytes)
+🎤 Audio socket: sent chunk 1150 (4096 bytes)
+🎤 Audio socket: sent chunk 1200 (4096 bytes)
+🎤 Audio socket: sent chunk 1250 (4096 bytes)
+🎤 Audio socket: sent chunk 1300 (4096 bytes)
+🎤 Audio socket: sent chunk 1350 (4096 bytes)
+🎤 Audio socket: sent chunk 1400 (4096 bytes)
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1280x720 @ 25fps)...
+✓ Camera pipeline started (PID: 80294)
+
+🎤 Audio socket: sent chunk 1450 (4096 bytes)
+🎤 Audio socket: sent chunk 1500 (4096 bytes)
+🎤 Audio socket: sent chunk 1550 (4096 bytes)
+🎤 Audio socket: sent chunk 1600 (4096 bytes)
+🎤 Audio socket: sent chunk 1650 (4096 bytes)
+🎤 Audio socket: sent chunk 1700 (4096 bytes)
+🎤 Audio socket: sent chunk 1750 (4096 bytes)
+🎤 Audio socket: sent chunk 1800 (4096 bytes)
+🎤 Audio socket: sent chunk 1850 (4096 bytes)
+🎤 Audio socket: sent chunk 1900 (4096 bytes)
+🎤 Audio socket: sent chunk 1950 (4096 bytes)
+🎤 Audio socket: sent chunk 2000 (4096 bytes)
+🎤 Audio socket: sent chunk 2050 (4096 bytes)
+🎤 Audio socket: sent chunk 2100 (4096 bytes)
+🎤 Audio socket: sent chunk 2150 (4096 bytes)
+📹 Video socket closed: [Errno 32] Broken pipe
+📹 Video socket disconnected
+🎤 Audio socket closed: Connection closed: 1005 
+🎤 Audio socket disconnected
+✓ Selected camera device rpicam://0 (CSI camera via rpicam-vid mjpeg stream)
+Starting camera pipeline (rpicam-vid mjpeg, camera 0, 1280x720 @ 25fps)...
+✓ Camera pipeline started (PID: 80410)
+
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1280x720 @ 25fps)...
+✓ Camera pipeline started (PID: 80494)
+
+📹 Video socket closed: Connection closed: 1005 
+📹 Video socket disconnected
+📹 Video socket connected
+📹 Video socket closed: Connection closed: 1005 
+📹 Video socket disconnected
+📹 Video socket connected
+📹 Video socket closed: Connection closed: 1005 
+📹 Video socket disconnected
+📹 Video socket connected
+🎤 Audio socket connected
+🎤 Audio socket: sent chunk 50 (4096 bytes)
+🎤 Audio socket: sent chunk 100 (4096 bytes)
+🎤 Audio socket: sent chunk 150 (4096 bytes)
+🎤 Audio socket: sent chunk 200 (4096 bytes)
+🎤 Audio socket: sent chunk 250 (4096 bytes)
+🎤 Audio socket: sent chunk 300 (4096 bytes)
+🎤 Audio socket: sent chunk 350 (4096 bytes)
+🎤 Audio socket: sent chunk 400 (4096 bytes)
+🎤 Audio socket closed: Connection closed: 1005 
+🎤 Audio socket disconnected
+📹 Video socket closed: Connection closed: 1005 
+📹 Video socket disconnected
+📹 Video socket connected
+🎤 Audio socket connected
+🎤 Audio socket: sent chunk 50 (4096 bytes)
+🎤 Audio socket: sent chunk 100 (4096 bytes)
+🎤 Audio socket: sent chunk 150 (4096 bytes)
+🎤 Audio socket: sent chunk 200 (4096 bytes)
+📹 Video socket connected
+🎤 Audio socket: sent chunk 250 (4096 bytes)
+🎤 Audio socket: sent chunk 300 (4096 bytes)
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1920x1080 @ 25fps)...
+✓ Camera pipeline started (PID: 81905)
+
+🎤 Audio socket: sent chunk 350 (4096 bytes)
+🎤 Audio socket: sent chunk 400 (4096 bytes)
+🎤 Audio socket: sent chunk 450 (4096 bytes)
+🎤 Audio socket: sent chunk 500 (4096 bytes)
+🎤 Audio socket: sent chunk 550 (4096 bytes)
+🎤 Audio socket: sent chunk 600 (4096 bytes)
+🎤 Audio socket: sent chunk 650 (4096 bytes)
+🎤 Audio socket: sent chunk 700 (4096 bytes)
+🎤 Audio socket: sent chunk 750 (4096 bytes)
+🎤 Audio socket: sent chunk 800 (4096 bytes)
+🎤 Audio socket: sent chunk 850 (4096 bytes)
+🎤 Audio socket: sent chunk 900 (4096 bytes)
+🎤 Audio socket: sent chunk 950 (4096 bytes)
+🎤 Audio socket: sent chunk 1000 (4096 bytes)
+🎤 Audio socket: sent chunk 1050 (4096 bytes)
+🎤 Audio socket: sent chunk 1100 (4096 bytes)
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1280x720 @ 25fps)...
+✓ Camera pipeline started (PID: 81995)
+
+🎤 Audio socket: sent chunk 1150 (4096 bytes)
+🎤 Audio socket: sent chunk 1200 (4096 bytes)
+🎤 Audio socket: sent chunk 1250 (4096 bytes)
+🎤 Audio socket: sent chunk 1300 (4096 bytes)
+🎤 Audio socket: sent chunk 1350 (4096 bytes)
+🎤 Audio socket: sent chunk 1400 (4096 bytes)
+🎤 Audio socket: sent chunk 1450 (4096 bytes)
+🎤 Audio socket: sent chunk 1500 (4096 bytes)
+🎤 Audio socket: sent chunk 1550 (4096 bytes)
+🎤 Audio socket: sent chunk 1600 (4096 bytes)
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1920x1080 @ 25fps)...
+✓ Camera pipeline started (PID: 82134)
+
+🎤 Audio socket: sent chunk 1650 (4096 bytes)
+🎤 Audio socket: sent chunk 1700 (4096 bytes)
+🎤 Audio socket: sent chunk 1750 (4096 bytes)
+🎤 Audio socket: sent chunk 1800 (4096 bytes)
+🎤 Audio socket: sent chunk 1850 (4096 bytes)
+🎤 Audio socket: sent chunk 1900 (4096 bytes)
+🎤 Audio socket: sent chunk 1950 (4096 bytes)
+🎤 Audio socket: sent chunk 2000 (4096 bytes)
+🎤 Audio socket: sent chunk 2050 (4096 bytes)
+✓ Selected camera device /dev/video8 (video capture with mjpeg support)
+Starting camera pipeline (ffmpeg v4l2 mjpeg, /dev/video8, 1280x720 @ 25fps)...
+✓ Camera pipeline started (PID: 82211)
+
+🎤 Audio socket: sent chunk 2100 (4096 bytes)
+🎤 Audio socket: sent chunk 2150 (4096 bytes)
+🎤 Audio socket: sent chunk 2200 (4096 bytes)
+🎤 Audio socket: sent chunk 2250 (4096 bytes)
+🎤 Audio socket: sent chunk 2300 (4096 bytes)
+🎤 Audio socket: sent chunk 2350 (4096 bytes)
+🎤 Audio socket: sent chunk 2400 (4096 bytes)
+🎤 Audio socket: sent chunk 2450 (4096 bytes)
+🎤 Audio socket: sent chunk 2500 (4096 bytes)
+🎤 Audio socket: sent chunk 2550 (4096 bytes)
+🎤 Audio socket: sent chunk 2600 (4096 bytes)
+📹 Video socket closed: Connection closed: 1000 Client closing
+📹 Video socket disconnected
+🎤 Audio socket closed: Connection closed: 1000 Client closing
+🎤 Audio socket disconnected
+🎤 Audio socket connected
+📹 Video socket connected
+🎤 Audio socket: sent chunk 50 (4096 bytes)
+🎤 Audio socket: sent chunk 100 (4096 bytes)
+🎤 Audio socket: sent chunk 150 (4096 bytes)
+🎤 Audio socket: sent chunk 200 (4096 bytes)
+🎤 Audio socket: sent chunk 250 (4096 bytes)
+🎤 Audio socket: sent chunk 300 (4096 bytes)
