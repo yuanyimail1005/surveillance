@@ -503,25 +503,6 @@
 
             <div class="controls-section">
                 <div class="control-group">
-                    <h3>🎤 Listen to Microphone</h3>
-                    <div class="button-group">
-                        <button class="btn-primary" id="listen-btn" onclick="toggleListen()">
-                            ▶ Start Listening
-                        </button>
-                    </div>
-                    <div id="listen-status" class="status inactive">
-                        Speaker: Off
-                    </div>
-                    <div class="volume-meter">
-                        <p>🔊 Received Volume:</p>
-                        <div class="volume-bar-container">
-                            <div class="volume-bar" id="listen-volume-bar"></div>
-                        </div>
-                        <p class="volume-text" id="listen-volume-text">0%</p>
-                    </div>
-                </div>
-
-                <div class="control-group">
                     <h3>🎙️ Talk to Speaker</h3>
                     <div class="button-group">
                         <button class="btn-primary" id="talk-btn" onclick="toggleTalk()">
@@ -1847,15 +1828,6 @@
             }
         }
 
-        // Toggle listening to remote microphone
-        async function toggleListen() {
-            if (isListening) {
-                stopListening();
-            } else {
-                startListening();
-            }
-        }
-
         async function startListening() {
             if (listenSocket && (listenSocket.readyState === WebSocket.OPEN || listenSocket.readyState === WebSocket.CONNECTING)) {
                 return;
@@ -2175,13 +2147,17 @@
                 const btn = document.getElementById('listen-btn');
                 const status = document.getElementById('listen-status');
 
-                btn.className = isActive ? 'btn-danger' : 'btn-primary';
-                btn.textContent = isActive ? '⏹ Stop Listening' : '▶ Start Listening';
+                if (btn) {
+                    btn.className = isActive ? 'btn-danger' : 'btn-primary';
+                    btn.textContent = isActive ? '⏹ Stop Listening' : '▶ Start Listening';
+                }
 
-                status.className = isActive ? 'status active' : 'status inactive';
-                status.innerHTML = isActive ?
-                    '<span class="recording-indicator"></span>Speaker: On' :
-                    'Speaker: Off';
+                if (status) {
+                    status.className = isActive ? 'status active' : 'status inactive';
+                    status.innerHTML = isActive ?
+                        '<span class="recording-indicator"></span>Speaker: On' :
+                        'Speaker: Off';
+                }
             } else if (type === 'talk') {
                 const btn = document.getElementById('talk-btn');
                 const status = document.getElementById('talk-status');
@@ -2220,6 +2196,7 @@
         initializeCameraSettingsControl();
         initializeVideoRecordingControl();
         startVideoStream();
+        startListening();
         refreshSystemStatus();
         setInterval(refreshSystemStatus, 5000);
 
