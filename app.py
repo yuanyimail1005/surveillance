@@ -308,9 +308,20 @@ def restart_audio_capture_process():
                 except Exception:
                     pass
             audio_proc = None
+        ensure_pulseaudio_backend_ready()
         audio_proc = start_audio()
         audio_broadcaster.set_proc(audio_proc)
         return audio_proc is not None
+
+def ensure_pulseaudio_backend_ready():
+    """Ensure the PulseAudio daemon and optional echo-cancel devices are ready."""
+    if not ensure_pulseaudio_daemon_running():
+        return False
+
+    if PULSE_ECHO_CANCEL_ENABLED:
+        _setup_pulseaudio_echo_cancel()
+
+    return True
 
 def ensure_audio_capture_process_running():
     """Ensure audio capture process exists and is alive."""
@@ -320,6 +331,10 @@ def ensure_audio_capture_process_running():
         if audio_proc is not None and audio_proc.poll() is None:
             return True
         print('⚙ Audio capture process not running, restarting...')
+        if not ensure_pulseaudio_backend_ready():
+            audio_proc = None
+            audio_broadcaster.set_proc(audio_proc)
+            return False
         audio_proc = start_audio()
         audio_broadcaster.set_proc(audio_proc)
         return audio_proc is not None
@@ -829,6 +844,10 @@ def ensure_camera_process_running():
 def start_audio():
     """Start audio recording from selected PulseAudio source."""
     try:
+        if not ensure_pulseaudio_backend_ready():
+            print('⚠ Audio failed: PulseAudio backend not ready\n')
+            return None
+
         capture_source = PULSE_CAPTURE_SOURCE_NAME
         if not capture_source or capture_source in ('@DEFAULT_SOURCE@', 'default'):
             capture_source = _resolve_default_source()

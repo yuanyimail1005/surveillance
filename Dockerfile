@@ -1,4 +1,4 @@
-FROM vascoguita/raspios:latest
+FROM dtcooper/raspberrypi-os:bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,10 +16,6 @@ WORKDIR /app
 # - rpicam-apps for CSI camera discovery and streaming
 RUN set -eux; \
     apt-get update; \
-    # `adduser` in this base image expects a lock file at /run/adduser.
-    mkdir -p /run; \
-    rm -rf /run/adduser; \
-    touch /run/adduser; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
@@ -27,8 +23,6 @@ RUN set -eux; \
         python3-dev \
         build-essential \
         cmake \
-        libopenblas-dev \
-        liblapack-dev \
         ffmpeg \
         pulseaudio \
         pulseaudio-utils \

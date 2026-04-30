@@ -8,6 +8,8 @@ services:
     restart: unless-stopped
     network_mode: host
     privileged: true
+    env_file:
+      - .env
     environment:
       SERVER_HOST: ${SERVER_HOST:-0.0.0.0}
       SERVER_PORT: ${SERVER_PORT:-5000}
