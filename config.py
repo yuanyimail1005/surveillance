@@ -56,3 +56,9 @@ SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.environ.get('SERVER_PORT', '5000'))
 SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', 'cert.pem')
 SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', 'key.pem')
+
+FACE_RECOGNITION_ENABLED = os.environ.get('FACE_RECOGNITION_ENABLED', 'true').lower() == 'true'
+FACE_RECOGNITION_KNOWN_FACES_DIR = os.environ.get('FACE_RECOGNITION_KNOWN_FACES_DIR', '~/known_faces')
+FACE_RECOGNITION_DETECT_EVERY_N_FRAMES = max(1, int(os.environ.get('FACE_RECOGNITION_DETECT_EVERY_N_FRAMES', '10')))
+FACE_RECOGNITION_MATCH_THRESHOLD = float(os.environ.get('FACE_RECOGNITION_MATCH_THRESHOLD', '0.45'))
+FACE_RECOGNITION_MAX_FACES = max(1, int(os.environ.get('FACE_RECOGNITION_MAX_FACES', '8')))

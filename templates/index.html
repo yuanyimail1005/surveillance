@@ -53,6 +53,12 @@
             gap: 15px;
         }
 
+        .video-feed-wrapper {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+        }
+
         #video-feed {
             width: 100%;
             aspect-ratio: 16 / 9;
@@ -61,6 +67,16 @@
             border: 3px solid #667eea;
             background: #000;
             display: block;
+            transform-origin: center center;
+            transition: transform 0.22s ease;
+        }
+
+        #face-overlay {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
             transform-origin: center center;
             transition: transform 0.22s ease;
         }
@@ -443,7 +459,10 @@
 
         <div class="content">
             <div class="video-section">
-                <img id="video-feed" alt="Live Video Feed">
+                <div class="video-feed-wrapper">
+                    <img id="video-feed" alt="Live Video Feed">
+                    <canvas id="face-overlay"></canvas>
+                </div>
                 <div class="video-tools">
                     <div style="display:flex; gap:12px; align-items:flex-end;">
                         <div style="flex:1;">
@@ -547,6 +566,7 @@
                             <span id="camera-source-badge" class="source-badge {{ camera_source_type | lower }}">{{ camera_source_type }}</span>
                         </p>
                         <p><strong>Audio:</strong> 48000Hz Mono</p>
+                        <p id="face-ai-status"><strong>Face AI:</strong> Initializing...</p>
                         <p id="system-status"><strong>Status:</strong> Running ✓</p>
                     </div>
                 </div>
@@ -572,10 +592,13 @@
         let talkMeterSmooth = 0;
         let videoSocket = null;
         let videoFrameUrl = null;
+        let videoPendingFrameUrl = null;
+        let videoFrameSwapInProgress = false;
         let videoReconnectTimer = null;
         let videoReconnectAttempt = 0;
         let videoExpectedClose = false;
         let videoSettingsApplyInProgress = false;
+        let droppedVideoFrames = 0;
         let isRecordingVideo = false;
         let recordingCanvas = null;
         let recordingContext = null;
@@ -598,6 +621,9 @@
         let talkSocket = null;
         let talkWorkletModulePromise = null;
         let speakerVolumeDebounceTimer = null;
+        let faceStatusTimer = null;
+        let latestFaceResult = null;
+        let lastVideoFrameAt = 0;
         let droppedListenChunks = 0;
         let serverMicOptions = [];
         let serverSpeakerOptions = [];
@@ -733,9 +759,60 @@
             }, delay);
         }
 
+        function flushPendingVideoFrame(feed) {
+            if (!feed || !videoPendingFrameUrl) {
+                videoFrameSwapInProgress = false;
+                return;
+            }
+
+            const nextUrl = videoPendingFrameUrl;
+            const previousUrl = videoFrameUrl;
+            videoPendingFrameUrl = null;
+            videoFrameUrl = nextUrl;
+            videoFrameSwapInProgress = true;
+            feed.src = nextUrl;
+            if (previousUrl) {
+                URL.revokeObjectURL(previousUrl);
+            }
+
+            lastVideoFrameAt = Date.now();
+        }
+
+        function queueVideoFrame(feed, frameBlob) {
+            if (!feed) {
+                return;
+            }
+
+            const frameUrl = URL.createObjectURL(frameBlob);
+            if (videoPendingFrameUrl) {
+                URL.revokeObjectURL(videoPendingFrameUrl);
+                droppedVideoFrames += 1;
+                if (droppedVideoFrames % 50 === 0) {
+                    debug(`Dropped ${droppedVideoFrames} stale video frames to reduce latency`);
+                }
+            }
+            videoPendingFrameUrl = frameUrl;
+
+            if (!videoFrameSwapInProgress) {
+                flushPendingVideoFrame(feed);
+            }
+        }
+
         function startVideoStream() {
             const feed = document.getElementById('video-feed');
             if (!feed) return;
+
+            if (feed.dataset.videoFrameDropBound !== '1') {
+                const settleFrameSwap = () => {
+                    videoFrameSwapInProgress = false;
+                    if (videoPendingFrameUrl) {
+                        flushPendingVideoFrame(feed);
+                    }
+                };
+                feed.addEventListener('load', settleFrameSwap);
+                feed.addEventListener('error', settleFrameSwap);
+                feed.dataset.videoFrameDropBound = '1';
+            }
 
             if (videoSocket && (videoSocket.readyState === WebSocket.OPEN || videoSocket.readyState === WebSocket.CONNECTING)) {
                 return;
@@ -757,17 +834,21 @@
             });
 
             videoSocket.addEventListener('message', (event) => {
+                if (typeof event.data === 'string') {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'face_data') {
+                            handleFaceDataPush(msg);
+                        }
+                    } catch (_) {}
+                    return;
+                }
+
                 if (!(event.data instanceof Blob)) {
                     return;
                 }
 
-                const frameUrl = URL.createObjectURL(event.data);
-                const previousUrl = videoFrameUrl;
-                videoFrameUrl = frameUrl;
-                feed.src = frameUrl;
-                if (previousUrl) {
-                    URL.revokeObjectURL(previousUrl);
-                }
+                queueVideoFrame(feed, event.data);
             });
 
             videoSocket.addEventListener('close', () => {
@@ -816,6 +897,11 @@
                 URL.revokeObjectURL(videoFrameUrl);
                 videoFrameUrl = null;
             }
+            if (videoPendingFrameUrl) {
+                URL.revokeObjectURL(videoPendingFrameUrl);
+                videoPendingFrameUrl = null;
+            }
+            videoFrameSwapInProgress = false;
         }
 
         function rmsToPercent(rms) {
@@ -1774,12 +1860,140 @@
 
         function applyCameraRotation(degrees) {
             const feed = document.getElementById('video-feed');
+            const faceOverlay = document.getElementById('face-overlay');
             if (!feed) return;
 
             const normalized = Number(degrees);
             const valid = [0, 90, 180, 270].includes(normalized) ? normalized : 0;
             const scale = (valid === 90 || valid === 270) ? 0.5625 : 1;
             feed.style.transform = `rotate(${valid}deg) scale(${scale})`;
+            if (faceOverlay) {
+                faceOverlay.style.transform = `rotate(${valid}deg) scale(${scale})`;
+            }
+        }
+
+        function drawFaceOverlay() {
+            const canvas = document.getElementById('face-overlay');
+            const feed = document.getElementById('video-feed');
+            if (!canvas || !feed) {
+                return;
+            }
+
+            const ctx = canvas.getContext('2d');
+            const width = Math.max(1, Math.round(feed.clientWidth));
+            const height = Math.max(1, Math.round(feed.clientHeight));
+            if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Hide overlay when the displayed video frame is stale (no new frames for 2s).
+            if (lastVideoFrameAt > 0 && Date.now() - lastVideoFrameAt > 2000) {
+                return;
+            }
+
+            const faces = latestFaceResult?.faces || [];
+            const sourceWidth = latestFaceResult?.image_width || 0;
+            const sourceHeight = latestFaceResult?.image_height || 0;
+            if (!faces.length || sourceWidth <= 0 || sourceHeight <= 0) {
+                return;
+            }
+
+            const scaleX = canvas.width / sourceWidth;
+            const scaleY = canvas.height / sourceHeight;
+            ctx.lineWidth = 2;
+            ctx.font = '600 14px Segoe UI';
+            ctx.textBaseline = 'top';
+
+            faces.forEach((face) => {
+                const x = Math.max(0, Math.round(face.left * scaleX));
+                const y = Math.max(0, Math.round(face.top * scaleY));
+                const w = Math.max(1, Math.round((face.right - face.left) * scaleX));
+                const h = Math.max(1, Math.round((face.bottom - face.top) * scaleY));
+                const isKnown = face.name && face.name !== 'Unknown';
+                const color = isKnown ? '#2ecc71' : '#f39c12';
+
+                ctx.strokeStyle = color;
+                ctx.strokeRect(x, y, w, h);
+
+                const confidencePct = Math.round((Number(face.confidence) || 0) * 100);
+                const label = isKnown ? `${face.name} (${confidencePct}%)` : 'Unknown';
+                const textWidth = Math.ceil(ctx.measureText(label).width);
+                const labelX = x;
+                const labelY = Math.max(0, y - 18);
+                ctx.fillStyle = color;
+                ctx.fillRect(labelX, labelY, textWidth + 8, 18);
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText(label, labelX + 4, labelY + 2);
+            });
+        }
+
+        function handleFaceDataPush(data) {
+            const status = document.getElementById('face-ai-status');
+            if (!data.enabled) {
+                if (status) {
+                    status.innerHTML = '<strong>Face AI:</strong> Disabled';
+                }
+                latestFaceResult = null;
+                drawFaceOverlay();
+                return;
+            }
+            if (!data.available) {
+                if (status) {
+                    status.innerHTML = `<strong>Face AI:</strong> Unavailable (${data.message || 'not ready'})`;
+                }
+                latestFaceResult = null;
+                drawFaceOverlay();
+                return;
+            }
+            latestFaceResult = data.result || null;
+            const faceCount = latestFaceResult?.faces?.length || 0;
+            if (status) {
+                status.innerHTML = `<strong>Face AI:</strong> Active, ${faceCount} face(s), ${data.known_faces_count} known profile(s)`;
+            }
+            drawFaceOverlay();
+        }
+
+        async function pollFaceStatus() {
+            const status = document.getElementById('face-ai-status');
+            try {
+                const response = await fetch('/face_status');
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                if (!data.enabled) {
+                    if (status) {
+                        status.innerHTML = '<strong>Face AI:</strong> Disabled';
+                    }
+                    latestFaceResult = null;
+                    drawFaceOverlay();
+                    return;
+                }
+
+                if (!data.available) {
+                    if (status) {
+                        status.innerHTML = `<strong>Face AI:</strong> Unavailable (${data.message || 'not ready'})`;
+                    }
+                    latestFaceResult = null;
+                    drawFaceOverlay();
+                    return;
+                }
+
+                latestFaceResult = data.result || null;
+                const faceCount = latestFaceResult?.faces?.length || 0;
+                if (status) {
+                    status.innerHTML = `<strong>Face AI:</strong> Active, ${faceCount} face(s), ${data.known_faces_count} known profile(s)`;
+                }
+                drawFaceOverlay();
+            } catch (error) {
+                if (status) {
+                    status.innerHTML = `<strong>Face AI:</strong> Error (${error.message})`;
+                }
+            }
         }
 
         function initializeCameraRotationControl() {
@@ -2174,6 +2388,10 @@
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
+            if (faceStatusTimer) {
+                clearInterval(faceStatusTimer);
+                faceStatusTimer = null;
+            }
             stopVideoStream();
             stopListening();
             stopTalking();
@@ -2197,6 +2415,8 @@
         initializeVideoRecordingControl();
         startVideoStream();
         startListening();
+        window.addEventListener('resize', drawFaceOverlay);
+        pollFaceStatus();
         refreshSystemStatus();
         setInterval(refreshSystemStatus, 5000);
 
