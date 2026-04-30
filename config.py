@@ -59,6 +59,13 @@ SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', 'key.pem')
 
 FACE_RECOGNITION_ENABLED = os.environ.get('FACE_RECOGNITION_ENABLED', 'true').lower() == 'true'
 FACE_RECOGNITION_KNOWN_FACES_DIR = os.environ.get('FACE_RECOGNITION_KNOWN_FACES_DIR', '~/known_faces')
-FACE_RECOGNITION_DETECT_EVERY_N_FRAMES = max(1, int(os.environ.get('FACE_RECOGNITION_DETECT_EVERY_N_FRAMES', '10')))
+FACE_RECOGNITION_DETECT_EVERY_N_FRAMES = max(1, int(os.environ.get('FACE_RECOGNITION_DETECT_EVERY_N_FRAMES', '5')))
 FACE_RECOGNITION_MATCH_THRESHOLD = float(os.environ.get('FACE_RECOGNITION_MATCH_THRESHOLD', '0.45'))
 FACE_RECOGNITION_MAX_FACES = max(1, int(os.environ.get('FACE_RECOGNITION_MAX_FACES', '8')))
+FACE_RECOGNITION_BACKEND = os.environ.get('FACE_RECOGNITION_BACKEND', 'auto').lower()
+FACE_RECOGNITION_YUNET_MODEL_PATH = os.path.expanduser(
+    os.environ.get('FACE_RECOGNITION_YUNET_MODEL_PATH', './models/face_detection_yunet_2023mar.onnx')
+)
+FACE_RECOGNITION_SFACE_MODEL_PATH = os.path.expanduser(
+    os.environ.get('FACE_RECOGNITION_SFACE_MODEL_PATH', './models/face_recognition_sface_2021dec.onnx')
+)

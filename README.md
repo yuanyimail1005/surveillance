@@ -34,6 +34,16 @@ Key variables in `.env`:
 | `CAMERA_FPS` | `25` | Default capture frame rate |
 | `PULSE_ECHO_CANCEL_ENABLED` | `true` | Enable WebRTC echo cancellation |
 | `TALKBACK_PLAYBACK_GAIN` | `5.0` | Talkback audio gain |
+| `FACE_RECOGNITION_ENABLED` | `true` | Enable face recognition |
+| `FACE_RECOGNITION_KNOWN_FACES_DIR` | `~/known_faces` | Directory of known faces (one subdirectory per person, containing JPEG/PNG images) |
+| `FACE_RECOGNITION_DETECT_EVERY_N_FRAMES` | `5` | Run detection every N frames to reduce CPU load |
+| `FACE_RECOGNITION_MATCH_THRESHOLD` | `0.45` | Maximum face distance to count as a match (lower = stricter) |
+| `FACE_RECOGNITION_MAX_FACES` | `8` | Maximum number of faces to detect per frame |
+| `FACE_RECOGNITION_BACKEND` | `auto` | Backend preference: `auto`, `opencv`, or `dlib` |
+| `FACE_RECOGNITION_YUNET_MODEL_PATH` | `./models/face_detection_yunet_2023mar.onnx` | Path to OpenCV YuNet detector model |
+| `FACE_RECOGNITION_SFACE_MODEL_PATH` | `./models/face_recognition_sface_2021dec.onnx` | Path to OpenCV SFace embedding model |
+
+When `FACE_RECOGNITION_BACKEND=auto`, the app tries OpenCV YuNet/SFace first and falls back to dlib (`face-recognition`) if OpenCV models are unavailable.
 
 ### Build
 
