@@ -1758,6 +1758,7 @@
 
         async function takeSnapshot() {
             const feed = document.getElementById('video-feed');
+            const faceOverlay = document.getElementById('face-overlay');
             if (!feed || !feed.naturalWidth || !feed.naturalHeight) {
                 setRecordingStatus('Snapshot failed: no video frame available');
                 return;
@@ -1771,6 +1772,21 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(feed, 0, 0);
 
+                if (faceOverlay && faceOverlay.width > 0 && faceOverlay.height > 0) {
+                    const scaleX = canvas.width / faceOverlay.width;
+                    const scaleY = canvas.height / faceOverlay.height;
+                    ctx.drawImage(
+                        faceOverlay,
+                        0,
+                        0,
+                        faceOverlay.width,
+                        faceOverlay.height,
+                        0,
+                        0,
+                        faceOverlay.width * scaleX,
+                        faceOverlay.height * scaleY
+                    );
+                }
                 const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
                 if (!blob) throw new Error('Canvas toBlob returned null');
 
