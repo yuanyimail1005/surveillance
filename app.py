@@ -14,6 +14,7 @@ import re
 import queue
 import json
 import multiprocessing
+import pickle
 import werkzeug.serving
 import importlib
 
@@ -896,6 +897,7 @@ class FaceRecognitionService:
         detect_every_n_frames,
         match_threshold,
         max_faces,
+        backend=None,
     ):
         self._enabled_requested = bool(enabled)
         self._known_faces_dir = known_faces_dir
@@ -926,7 +928,7 @@ class FaceRecognitionService:
             self._status_message = 'numpy/cv2 dependencies unavailable'
             return
 
-        backend = FACE_RECOGNITION_BACKEND
+        backend = backend if backend is not None else FACE_RECOGNITION_BACKEND
         if backend not in ('auto', 'opencv', 'dlib'):
             backend = 'auto'
 
@@ -983,76 +985,148 @@ class FaceRecognitionService:
         self._status_message = 'ready (dlib)'
         return True
 
+    @staticmethod
+    def _image_file_key(path):
+        """Return a (path, mtime, size) tuple used as a cache key."""
+        try:
+            st = os.stat(path)
+            return (path, st.st_mtime, st.st_size)
+        except OSError:
+            return (path, 0, 0)
+
+    def _cache_path(self, backend_tag):
+        return os.path.join(self._known_faces_dir, f'.face_encodings_cache_{backend_tag}.pkl')
+
+    def _load_cache(self, backend_tag):
+        """Return cached (keys, encodings, names) or (None, None, None) if invalid."""
+        path = self._cache_path(backend_tag)
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            if not isinstance(data, dict) or data.get('version') != 1:
+                return None, None, None
+            return data['keys'], data['encodings'], data['names']
+        except Exception:
+            return None, None, None
+
+    def _save_cache(self, backend_tag, keys, encodings, names):
+        path = self._cache_path(backend_tag)
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump({'version': 1, 'keys': keys, 'encodings': encodings, 'names': names}, f)
+        except Exception:
+            pass
+
+    def _collect_image_paths(self, root):
+        """Return sorted list of (person_name, image_path) pairs under root."""
+        image_patterns = ('*.jpg', '*.jpeg', '*.png')
+        pairs = []
+        for person_name in sorted(os.listdir(root)):
+            person_dir = os.path.join(root, person_name)
+            if not os.path.isdir(person_dir):
+                continue
+            for pattern in image_patterns:
+                for p in sorted(glob.glob(os.path.join(person_dir, pattern))):
+                    pairs.append((person_name, p))
+        return pairs
+
     def _load_known_faces_dlib(self):
         root = self._known_faces_dir
         if not os.path.isdir(root):
             return
 
-        image_patterns = ('*.jpg', '*.jpeg', '*.png')
-        for person_name in sorted(os.listdir(root)):
-            person_dir = os.path.join(root, person_name)
-            if not os.path.isdir(person_dir):
+        pairs = self._collect_image_paths(root)
+        current_keys = [self._image_file_key(p) for _, p in pairs]
+
+        cached_keys, cached_encodings, cached_names = self._load_cache('dlib')
+        if cached_keys == current_keys and cached_encodings is not None:
+            self._known_encodings = cached_encodings
+            self._known_names = cached_names
+            print(f'✓ Face encodings loaded from cache ({len(cached_names)} faces)')
+            return
+
+        print(f'⚙ Computing dlib face encodings for {len(pairs)} images (this may take a while)...')
+        new_encodings = []
+        new_names = []
+        new_keys = []
+        for person_name, image_path in pairs:
+            try:
+                image = face_recognition.load_image_file(image_path)
+                encodings = face_recognition.face_encodings(image)
+                if not encodings:
+                    print(f'  ⚠ dlib: no face detected in {image_path}')
+                    continue
+                new_encodings.append(encodings[0])
+                new_names.append(person_name)
+                new_keys.append(self._image_file_key(image_path))
+            except Exception as e:
+                print(f'  ⚠ dlib: error processing {image_path}: {e}')
                 continue
 
-            image_paths = []
-            for pattern in image_patterns:
-                image_paths.extend(glob.glob(os.path.join(person_dir, pattern)))
-
-            for image_path in sorted(image_paths):
-                try:
-                    image = face_recognition.load_image_file(image_path)
-                    encodings = face_recognition.face_encodings(image)
-                    if not encodings:
-                        continue
-                    self._known_encodings.append(encodings[0])
-                    self._known_names.append(person_name)
-                except Exception:
-                    continue
+        self._known_encodings = new_encodings
+        self._known_names = new_names
+        self._save_cache('dlib', current_keys, new_encodings, new_names)
+        print(f'✓ Face encodings computed and cached ({len(new_names)} faces)')
 
     def _load_known_faces_opencv(self):
         root = self._known_faces_dir
         if not os.path.isdir(root):
             return
 
-        image_patterns = ('*.jpg', '*.jpeg', '*.png')
-        for person_name in sorted(os.listdir(root)):
-            person_dir = os.path.join(root, person_name)
-            if not os.path.isdir(person_dir):
+        pairs = self._collect_image_paths(root)
+        current_keys = [self._image_file_key(p) for _, p in pairs]
+
+        cached_keys, cached_encodings, cached_names = self._load_cache('opencv')
+        if cached_keys == current_keys and cached_encodings is not None:
+            self._known_encodings = cached_encodings
+            self._known_names = cached_names
+            print(f'✓ Face encodings loaded from cache ({len(cached_names)} faces)')
+            return
+
+        print(f'⚙ Computing opencv face encodings for {len(pairs)} images...')
+        new_encodings = []
+        new_names = []
+        new_keys = []
+        for person_name, image_path in pairs:
+            try:
+                image_bgr = cv2.imread(image_path)
+                if image_bgr is None:
+                    print(f'  ⚠ opencv: failed to read image {image_path}')
+                    continue
+
+                h, w = image_bgr.shape[:2]
+                self._face_detector.setInputSize((w, h))
+                _, detections = self._face_detector.detect(image_bgr)
+                if detections is None or len(detections) == 0:
+                    print(f'  ⚠ opencv: no face detected in {image_path}')
+                    continue
+
+                # Use the highest confidence detection to build one reference embedding.
+                best = max(detections, key=lambda d: float(d[14]) if len(d) > 14 else 0.0)
+                aligned = self._face_recognizer.alignCrop(image_bgr, best)
+                feature = self._face_recognizer.feature(aligned)
+                if feature is None:
+                    print(f'  ⚠ opencv: feature extraction returned None for {image_path}')
+                    continue
+
+                vec = np.asarray(feature, dtype=np.float32).flatten()
+                norm = float(np.linalg.norm(vec))
+                if norm <= 1e-8:
+                    print(f'  ⚠ opencv: zero-norm feature vector for {image_path}')
+                    continue
+                vec = vec / norm
+
+                new_encodings.append(vec)
+                new_names.append(person_name)
+                new_keys.append(self._image_file_key(image_path))
+            except Exception as e:
+                print(f'  ⚠ opencv: error processing {image_path}: {e}')
                 continue
 
-            image_paths = []
-            for pattern in image_patterns:
-                image_paths.extend(glob.glob(os.path.join(person_dir, pattern)))
-
-            for image_path in sorted(image_paths):
-                try:
-                    image_bgr = cv2.imread(image_path)
-                    if image_bgr is None:
-                        continue
-
-                    h, w = image_bgr.shape[:2]
-                    self._face_detector.setInputSize((w, h))
-                    _, detections = self._face_detector.detect(image_bgr)
-                    if detections is None or len(detections) == 0:
-                        continue
-
-                    # Use the highest confidence detection to build one reference embedding.
-                    best = max(detections, key=lambda d: float(d[14]) if len(d) > 14 else 0.0)
-                    aligned = self._face_recognizer.alignCrop(image_bgr, best)
-                    feature = self._face_recognizer.feature(aligned)
-                    if feature is None:
-                        continue
-
-                    vec = np.asarray(feature, dtype=np.float32).flatten()
-                    norm = float(np.linalg.norm(vec))
-                    if norm <= 1e-8:
-                        continue
-                    vec = vec / norm
-
-                    self._known_encodings.append(vec)
-                    self._known_names.append(person_name)
-                except Exception:
-                    continue
+        self._known_encodings = new_encodings
+        self._known_names = new_names
+        self._save_cache('opencv', current_keys, new_encodings, new_names)
+        print(f'✓ Face encodings computed and cached ({len(new_names)} faces)')
 
     def process_frame(self, frame_bytes):
         if not self._available or np is None or cv2 is None:
@@ -1241,6 +1315,7 @@ def _face_recognition_worker(
     detect_every_n_frames,
     match_threshold,
     max_faces,
+    backend=None,
 ):
     service = FaceRecognitionService(
         enabled=enabled,
@@ -1248,6 +1323,7 @@ def _face_recognition_worker(
         detect_every_n_frames=detect_every_n_frames,
         match_threshold=match_threshold,
         max_faces=max_faces,
+        backend=backend,
     )
 
     _queue_replace_latest(result_queue, service.get_status())
@@ -1278,8 +1354,10 @@ class FaceRecognitionProcessBridge:
         detect_every_n_frames,
         match_threshold,
         max_faces,
+        backend=None,
     ):
         self._enabled_requested = bool(enabled)
+        self._requested_backend = backend
         self._lock = threading.Lock()
         self._stop_collector = threading.Event()
 
@@ -1331,6 +1409,7 @@ class FaceRecognitionProcessBridge:
                 detect_every_n_frames,
                 match_threshold,
                 max_faces,
+                backend,
             ),
             daemon=True,
             name='face-recognition-worker',
@@ -1841,6 +1920,39 @@ def status():
 @app.route('/face_status', methods=['GET'])
 def face_status():
     return jsonify(face_recognition_service.get_status())
+
+face_recognition_service_lock = threading.Lock()
+
+@app.route('/face_settings', methods=['POST'])
+def set_face_settings():
+    global face_recognition_service
+
+    payload = request.get_json(silent=True) or {}
+
+    if 'enabled' not in payload and 'backend' not in payload:
+        return jsonify({'status': 'error', 'message': 'Provide enabled and/or backend'}), 400
+
+    enabled = bool(payload.get('enabled', True))
+    backend = str(payload.get('backend', 'auto')).lower()
+    if backend not in ('auto', 'opencv', 'dlib'):
+        return jsonify({'status': 'error', 'message': 'backend must be auto, opencv, or dlib'}), 400
+
+    with face_recognition_service_lock:
+        old_service = face_recognition_service
+        old_service.stop()
+
+        new_service = FaceRecognitionProcessBridge(
+            enabled=enabled,
+            known_faces_dir=FACE_RECOGNITION_KNOWN_FACES_DIR,
+            detect_every_n_frames=FACE_RECOGNITION_DETECT_EVERY_N_FRAMES,
+            match_threshold=FACE_RECOGNITION_MATCH_THRESHOLD,
+            max_faces=FACE_RECOGNITION_MAX_FACES,
+            backend=backend,
+        )
+        face_recognition_service = new_service
+        video_broadcaster._on_frame = new_service.process_frame if new_service.accepts_frames() else None
+
+    return jsonify({'status': 'ok', **face_recognition_service.get_status()})
 
 @app.route('/server_audio_devices', methods=['GET'])
 def server_audio_devices():
