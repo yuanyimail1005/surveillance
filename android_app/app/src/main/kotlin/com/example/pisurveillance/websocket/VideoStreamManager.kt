@@ -2,6 +2,10 @@ package com.example.pisurveillance.websocket
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import com.example.pisurveillance.models.FaceAiData
+import com.google.gson.Gson
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import okhttp3.*
@@ -16,9 +20,17 @@ class VideoStreamManager(
     private val httpClient: OkHttpClient
 ) {
     private var webSocket: WebSocket? = null
+    private val gson = Gson()
+    
+    private val processingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val frameChannel = Channel<ByteArray>(Channel.CONFLATED)
+    private var processingJob: Job? = null
 
     private val _frames = MutableStateFlow<Bitmap?>(null)
     val frames: StateFlow<Bitmap?> = _frames
+
+    private val _faceData = MutableStateFlow<FaceAiData?>(null)
+    val faceData: StateFlow<FaceAiData?> = _faceData
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected
@@ -26,11 +38,30 @@ class VideoStreamManager(
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
 
+    init {
+        startFrameProcessor()
+    }
+
+    private fun startFrameProcessor() {
+        processingJob?.cancel()
+        processingJob = processingScope.launch {
+            for (data in frameChannel) {
+                if (!isActive) break
+                processVideoFrame(data)
+            }
+        }
+    }
+
     /**
      * Connect to video feed WebSocket
      */
     fun connect() {
         if (webSocket != null) return
+        
+        // Ensure processor is running
+        if (processingJob == null || !processingJob!!.isActive) {
+            startFrameProcessor()
+        }
 
         try {
             val wsUrl = serverUrl.replace(Regex("^https://"), "wss://")
@@ -46,8 +77,21 @@ class VideoStreamManager(
                     _errorMessage.value = null
                 }
 
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    try {
+                        val data = gson.fromJson(text, FaceAiData::class.java)
+                        if (data.type == "face_data") {
+                            _faceData.value = data
+                        }
+                    } catch (e: Exception) {
+                        Timber.w("Failed to parse text message: $text")
+                    }
+                }
+
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    processVideoFrame(bytes.toByteArray())
+                    // Mechanism to drop stale frames: Channel.CONFLATED 
+                    // will only keep the most recent frame data if the processor is busy.
+                    frameChannel.trySend(bytes.toByteArray())
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -95,6 +139,10 @@ class VideoStreamManager(
         webSocket?.close(1000, "Client closing")
         webSocket = null
         _isConnected.value = false
+        
+        // Cancel processing to free up resources
+        processingJob?.cancel()
+        processingJob = null
     }
 
     /**

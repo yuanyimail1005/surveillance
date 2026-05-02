@@ -219,6 +219,18 @@
                             android:id="@+id/camera_fps_info"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
+                            android:layout_marginBottom="@dimen/spacing_medium"
+                            android:textColor="@color/text_secondary" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Face AI:" />
+
+                        <TextView
+                            android:id="@+id/face_ai_info"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
                             android:textColor="@color/text_secondary" />
 
                     </LinearLayout>

@@ -131,6 +131,10 @@ class VideoFragment : Fragment() {
                 binding.loadingSpinner.visibility = View.VISIBLE
             }
         }
+
+        viewModel?.faceData?.observe(viewLifecycleOwner) { faceAiData ->
+            binding.faceOverlay.setFaceData(faceAiData?.result)
+        }
     }
 
     /**

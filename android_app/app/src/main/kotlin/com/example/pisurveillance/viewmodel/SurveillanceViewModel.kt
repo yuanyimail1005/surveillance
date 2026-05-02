@@ -78,6 +78,12 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private val _talkbackConnected = MutableLiveData(false)
     val talkbackConnected: LiveData<Boolean> = _talkbackConnected
 
+    private val _faceData = MutableLiveData<FaceAiData?>(null)
+    val faceData: LiveData<FaceAiData?> = _faceData
+
+    private val _faceStatus = MutableLiveData<FaceStatusResponse?>(null)
+    val faceStatus: LiveData<FaceStatusResponse?> = _faceStatus
+
     private var initializationJob: Job? = null
     private var observationJob: Job? = null
 
@@ -116,6 +122,26 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
         observationJob = viewModelScope.launch {
             launch {
                 videoStreamManager?.frames?.collect { _videoFrames.postValue(it) }
+            }
+            launch {
+                videoStreamManager?.faceData?.collect { data ->
+                    _faceData.postValue(data)
+                    
+                    // Update configuration status ONLY if the WebSocket message contains 
+                    // actual configuration data (enabled, available, backend).
+                    // Many WebSocket pushes only contain detection results to save bandwidth.
+                    if (data != null && data.backend != null) {
+                        val currentStatus = _faceStatus.value
+                        _faceStatus.postValue(FaceStatusResponse(
+                            enabled = data.enabled,
+                            available = data.available,
+                            backend = data.backend,
+                            message = data.message ?: currentStatus?.message,
+                            knownFacesCount = data.knownFacesCount ?: currentStatus?.knownFacesCount,
+                            result = data.result
+                        ))
+                    }
+                }
             }
             launch {
                 audioStreamManager?.isConnected?.collect { _audioConnected.postValue(it) }
@@ -159,6 +185,7 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                 fetchCameraSettings()
                 fetchAudioDevices()
                 fetchSpeakerVolume()
+                fetchFaceStatus()
 
                 videoStreamManager?.connect()
                 audioStreamManager?.connect()
@@ -193,6 +220,9 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
             } else {
                 _connectionError.postValue("Status: ${response.code()}")
             }
+            
+            // Also refresh face status during regular status updates
+            fetchFaceStatus()
         } catch (e: Exception) {
             Timber.e(e, "Error fetching server status")
             _connectionError.postValue(e.message)
@@ -335,6 +365,41 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      */
     fun stopTalkback() {
         talkbackManager?.disconnect()
+    }
+
+    /**
+     * Fetch face recognition status
+     */
+    fun fetchFaceStatus() {
+        viewModelScope.launch {
+            try {
+                val service = apiService ?: return@launch
+                val response = service.getFaceStatus()
+                if (response.isSuccessful) {
+                    _faceStatus.postValue(response.body())
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error fetching face status")
+            }
+        }
+    }
+
+    /**
+     * Update face recognition settings
+     */
+    fun updateFaceSettings(enabled: Boolean, backend: String = "auto") {
+        viewModelScope.launch {
+            try {
+                val service = apiService ?: return@launch
+                val request = FaceSettingsRequest(enabled, backend)
+                val response = service.updateFaceSettings(request)
+                if (response.isSuccessful) {
+                    fetchFaceStatus()
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error updating face settings")
+            }
+        }
     }
 
     /**

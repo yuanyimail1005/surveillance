@@ -14,6 +14,12 @@
         android:scaleType="centerCrop"
         android:src="@android:drawable/ic_dialog_info" />
 
+    <!-- Face AI Overlay -->
+    <com.example.pisurveillance.ui.views.FaceOverlayView
+        android:id="@+id/face_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/video_player_height" />
+
     <!-- Loading Indicator -->
     <com.google.android.material.progressindicator.CircularProgressIndicator
         android:id="@+id/loading_spinner"
