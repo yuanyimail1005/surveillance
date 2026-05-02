@@ -2072,12 +2072,14 @@ def select_server_audio_devices():
 if __name__ == '__main__':
     print(f"Server: https://{SERVER_HOST}:{SERVER_PORT}\n")
     try:
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(SSL_CERT_PATH, SSL_KEY_PATH)
         app.run(
             host=SERVER_HOST,
             port=SERVER_PORT,
             debug=False,
             threaded=True,
-            ssl_context=(SSL_CERT_PATH, SSL_KEY_PATH)
+            ssl_context=ssl_ctx
         )
     except KeyboardInterrupt:
         print("\nShutting down...")
