@@ -3,6 +3,7 @@ FROM dtcooper/raspberrypi-os:bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    FACE_RECOGNITION_DETECT_EVERY_N_FRAMES= \
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:${PATH}"
 

@@ -98,6 +98,13 @@ active_camera_device = None
 camera_device_preference = CAMERA_DEVICE
 camera_proc_lock = threading.Lock()
 
+
+def _detect_every_n_frames():
+    """Return detect-every-N-frames: ~0.5 s at the current FPS (auto), or fixed env-var override."""
+    if FACE_RECOGNITION_DETECT_EVERY_N_FRAMES is not None:
+        return FACE_RECOGNITION_DETECT_EVERY_N_FRAMES
+    return max(1, camera_settings['fps'] // 2)
+
 print("\n" + "="*60)
 print("Surveillance System - Starting")
 print("="*60 + "\n")
@@ -916,6 +923,7 @@ class FaceRecognitionService:
         self._last_result = {
             'updated_at': None,
             'frame_index': 0,
+            'broadcast_frame_seq': 0,
             'image_width': 0,
             'image_height': 0,
             'faces': []
@@ -1128,7 +1136,7 @@ class FaceRecognitionService:
         self._save_cache('opencv', current_keys, new_encodings, new_names)
         print(f'✓ Face encodings computed and cached ({len(new_names)} faces)')
 
-    def process_frame(self, frame_bytes):
+    def process_frame(self, frame_bytes, frame_seq=0):
         if not self._available or np is None or cv2 is None:
             return
 
@@ -1142,7 +1150,7 @@ class FaceRecognitionService:
             return
 
         if self._backend == 'opencv':
-            self._process_frame_opencv(frame_bgr)
+            self._process_frame_opencv(frame_bgr, frame_seq)
             return
 
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -1188,12 +1196,13 @@ class FaceRecognitionService:
             self._last_result = {
                 'updated_at': time.time(),
                 'frame_index': self._frame_counter,
+                'broadcast_frame_seq': frame_seq,
                 'image_width': int(frame_bgr.shape[1]),
                 'image_height': int(frame_bgr.shape[0]),
                 'faces': faces,
             }
 
-    def _process_frame_opencv(self, frame_bgr):
+    def _process_frame_opencv(self, frame_bgr, frame_seq=0):
         h, w = frame_bgr.shape[:2]
 
         try:
@@ -1254,6 +1263,7 @@ class FaceRecognitionService:
             self._last_result = {
                 'updated_at': time.time(),
                 'frame_index': self._frame_counter,
+                'broadcast_frame_seq': frame_seq,
                 'image_width': int(w),
                 'image_height': int(h),
                 'faces': faces,
@@ -1331,14 +1341,15 @@ def _face_recognition_worker(
 
     while not stop_event.is_set():
         try:
-            frame = frame_queue.get(timeout=0.2)
+            item = frame_queue.get(timeout=0.2)
         except queue.Empty:
             continue
 
-        if frame is None:
+        if item is None:
             break
 
-        service.process_frame(frame)
+        frame, frame_seq = item
+        service.process_frame(frame, frame_seq)
         payload = service.get_push_payload_if_new(last_sent_idx)
         if payload is None:
             continue
@@ -1378,6 +1389,7 @@ class FaceRecognitionProcessBridge:
             'result': {
                 'updated_at': None,
                 'frame_index': 0,
+                'broadcast_frame_seq': 0,
                 'image_width': 0,
                 'image_height': 0,
                 'faces': [],
@@ -1441,10 +1453,10 @@ class FaceRecognitionProcessBridge:
     def accepts_frames(self):
         return self._frame_queue is not None and self._worker is not None and self._worker.is_alive()
 
-    def process_frame(self, frame_bytes):
+    def process_frame(self, frame_bytes, frame_seq=0):
         if not self.accepts_frames():
             return
-        _queue_replace_latest(self._frame_queue, frame_bytes)
+        _queue_replace_latest(self._frame_queue, (frame_bytes, frame_seq))
 
     def is_processing_enabled(self):
         with self._lock:
@@ -1498,6 +1510,7 @@ class FrameBroadcaster:
         self._lock = threading.Lock()
         self._subscribers = {}  # token_id -> queue.Queue
         self._proc = None
+        self._frame_seq = 0
         t = threading.Thread(target=self._run, daemon=True, name=f'broadcaster-{name}')
         t.start()
 
@@ -1518,12 +1531,12 @@ class FrameBroadcaster:
         with self._lock:
             self._subscribers.pop(id(token), None)
 
-    def _broadcast(self, frame):
+    def _broadcast(self, seq, frame):
         with self._lock:
             queues = list(self._subscribers.values())
         for q in queues:
             try:
-                q.put_nowait(frame)
+                q.put_nowait((seq, frame))
             except queue.Full:
                 pass  # slow client: drop frame rather than block
 
@@ -1540,9 +1553,11 @@ class FrameBroadcaster:
                         current_proc = self._proc
                     if current_proc is not proc:
                         break  # proc was replaced; restart outer loop
+                    self._frame_seq += 1
+                    seq = self._frame_seq
                     if self._on_frame is not None:
-                        self._on_frame(frame)
-                    self._broadcast(frame)
+                        self._on_frame(frame, seq)
+                    self._broadcast(seq, frame)
             except Exception as e:
                 print(f'[{self.name}] reader error: {e}')
                 time.sleep(0.05)
@@ -1595,7 +1610,7 @@ audio_proc = start_audio()
 face_recognition_service = FaceRecognitionProcessBridge(
     enabled=FACE_RECOGNITION_ENABLED,
     known_faces_dir=FACE_RECOGNITION_KNOWN_FACES_DIR,
-    detect_every_n_frames=FACE_RECOGNITION_DETECT_EVERY_N_FRAMES,
+    detect_every_n_frames=_detect_every_n_frames(),
     match_threshold=FACE_RECOGNITION_MATCH_THRESHOLD,
     max_faces=FACE_RECOGNITION_MAX_FACES,
 )
@@ -1642,13 +1657,14 @@ def video_feed_socket(ws):
     try:
         while True:
             try:
-                frame = q.get(timeout=5.0)
+                seq, frame = q.get(timeout=5.0)
             except queue.Empty:
                 if camera_proc is None or camera_proc.poll() is not None:
                     if not ensure_camera_process_running():
                         print('📹 Video socket: camera unavailable after restart attempt')
                         break
                 continue
+            ws.send(json.dumps({'type': 'frame_meta', 'broadcast_frame_seq': seq}))
             ws.send(frame)
             payload = face_recognition_service.get_push_payload_if_new(last_sent_face_idx)
             if payload is not None:
@@ -1674,7 +1690,7 @@ def audio_feed_socket(ws):
     try:
         while True:
             try:
-                chunk = q.get(timeout=5.0)
+                _, chunk = q.get(timeout=5.0)
             except queue.Empty:
                 if audio_proc is None or audio_proc.poll() is not None:
                     if not ensure_audio_capture_process_running():
@@ -1830,6 +1846,7 @@ def get_camera_settings():
 
 @app.route('/camera_settings', methods=['POST'])
 def set_camera_settings():
+    global face_recognition_service
     payload = request.get_json(silent=True) or {}
     requested_camera_device = payload.get('camera_device')
 
@@ -1882,11 +1899,28 @@ def set_camera_settings():
             'message': 'Camera settings unchanged'
         })
 
+    old_fps = camera_settings['fps']
+
     if not restart_camera_process(normalized):
         return jsonify({
             'status': 'error',
             'message': 'Failed to restart camera process with the requested settings'
         }), 500
+
+    if camera_settings['fps'] != old_fps and FACE_RECOGNITION_ENABLED:
+        with face_recognition_service_lock:
+            old_svc = face_recognition_service
+            old_svc.stop()
+            new_svc = FaceRecognitionProcessBridge(
+                enabled=old_svc._enabled_requested,
+                known_faces_dir=FACE_RECOGNITION_KNOWN_FACES_DIR,
+                detect_every_n_frames=_detect_every_n_frames(),
+                match_threshold=FACE_RECOGNITION_MATCH_THRESHOLD,
+                max_faces=FACE_RECOGNITION_MAX_FACES,
+                backend=old_svc._requested_backend,
+            )
+            face_recognition_service = new_svc
+            video_broadcaster._on_frame = new_svc.process_frame if new_svc.accepts_frames() else None
 
     return jsonify({
         'status': 'ok',
@@ -1944,7 +1978,7 @@ def set_face_settings():
         new_service = FaceRecognitionProcessBridge(
             enabled=enabled,
             known_faces_dir=FACE_RECOGNITION_KNOWN_FACES_DIR,
-            detect_every_n_frames=FACE_RECOGNITION_DETECT_EVERY_N_FRAMES,
+            detect_every_n_frames=_detect_every_n_frames(),
             match_threshold=FACE_RECOGNITION_MATCH_THRESHOLD,
             max_faces=FACE_RECOGNITION_MAX_FACES,
             backend=backend,

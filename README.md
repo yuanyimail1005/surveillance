@@ -36,7 +36,7 @@ Key variables in `.env`:
 | `TALKBACK_PLAYBACK_GAIN` | `5.0` | Talkback audio gain |
 | `FACE_RECOGNITION_ENABLED` | `true` | Enable face recognition |
 | `FACE_RECOGNITION_KNOWN_FACES_DIR` | `~/known_faces` | Directory of known faces (one subdirectory per person, containing JPEG/PNG images) |
-| `FACE_RECOGNITION_DETECT_EVERY_N_FRAMES` | `5` | Run detection every N frames to reduce CPU load |
+| `FACE_RECOGNITION_DETECT_EVERY_N_FRAMES` | `(empty = auto)` | Leave empty to detect every ~0.5s based on current FPS, or set N to force a fixed interval |
 | `FACE_RECOGNITION_MATCH_THRESHOLD` | `0.45` | Maximum face distance to count as a match (lower = stricter) |
 | `FACE_RECOGNITION_MAX_FACES` | `8` | Maximum number of faces to detect per frame |
 | `FACE_RECOGNITION_BACKEND` | `auto` | Backend preference: `auto`, `opencv`, or `dlib` |
