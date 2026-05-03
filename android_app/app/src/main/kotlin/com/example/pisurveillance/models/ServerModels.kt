@@ -160,6 +160,111 @@ data class VolumeResponse(
 )
 
 /**
+ * Metadata for upcoming video frame
+ */
+data class FrameMeta(
+    @SerializedName("type")
+    val type: String = "frame_meta",
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long
+)
+
+/**
+ * Individual face detection result
+ */
+data class FaceDetection(
+    @SerializedName("left")
+    val left: Int,
+    @SerializedName("top")
+    val top: Int,
+    @SerializedName("right")
+    val right: Int,
+    @SerializedName("bottom")
+    val bottom: Int,
+    @SerializedName("name")
+    val name: String?,
+    @SerializedName("confidence")
+    val confidence: Double?
+)
+
+/**
+ * Result of face detection on a frame
+ */
+data class FaceDetectionResult(
+    @SerializedName("image_width")
+    val imageWidth: Int,
+    @SerializedName("image_height")
+    val imageHeight: Int,
+    @SerializedName("frame_index")
+    val frameIndex: Long?,
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long?,
+    @SerializedName("faces")
+    val faces: List<FaceDetection>
+)
+
+/**
+ * Combined face AI data pushed from server
+ */
+data class FaceAiData(
+    @SerializedName("type")
+    val type: String = "face_data",
+    @SerializedName("enabled")
+    val enabled: Boolean,
+    @SerializedName("available")
+    val available: Boolean,
+    @SerializedName("backend")
+    val backend: String?,
+    @SerializedName("message")
+    val message: String?,
+    @SerializedName("known_faces_count")
+    val knownFacesCount: Int?,
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long?,
+    @SerializedName("result")
+    val result: FaceDetectionResult?
+)
+
+/**
+ * Face recognition settings
+ */
+data class FaceStatusResponse(
+    @SerializedName("enabled")
+    val enabled: Boolean,
+    @SerializedName("available")
+    val available: Boolean,
+    @SerializedName("backend")
+    val backend: String?,
+    @SerializedName("message")
+    val message: String?,
+    @SerializedName("known_faces_count")
+    val knownFacesCount: Int?,
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long?,
+    @SerializedName("result")
+    val result: FaceDetectionResult?
+)
+
+/**
+ * Request to update face settings
+ */
+data class FaceSettingsRequest(
+    val enabled: Boolean,
+    val backend: String? = "auto"
+)
+
+/**
+ * Response from face settings update
+ */
+data class FaceSettingsResponse(
+    val status: String,
+    val enabled: Boolean,
+    val backend: String?,
+    val available: Boolean,
+    val message: String?
+)
+
+/**
  * Request to select audio device
  */
 data class SelectAudioDeviceRequest(

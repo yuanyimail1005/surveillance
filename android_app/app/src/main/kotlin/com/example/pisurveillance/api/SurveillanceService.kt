@@ -56,4 +56,18 @@ interface SurveillanceService {
     suspend fun selectAudioDevice(
         @Body request: SelectAudioDeviceRequest
     ): Response<AudioDevicesResponse>
+
+    /**
+     * Get face recognition status
+     */
+    @GET("/face_status")
+    suspend fun getFaceStatus(): Response<FaceStatusResponse>
+
+    /**
+     * Update face recognition settings
+     */
+    @POST("/face_settings")
+    suspend fun updateFaceSettings(
+        @Body request: FaceSettingsRequest
+    ): Response<FaceSettingsResponse>
 }

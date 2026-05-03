@@ -1,10 +1,10 @@
 # surveillance
-a surveillance system with camera, speaker and microphone on raspberry pi
+A surveillance system with camera, speaker, microphone, and AI face recognition on Raspberry Pi. Supports real-time face detection and identification, live video/audio streaming, two-way talkback, snapshot capture, and video recording — accessible from a browser or the companion Android app.
 
 ## Docker
 
 The recommended way to run the app is with Docker Compose. The image is built on
-`vascoguita/raspios:latest` (arm64 Raspberry Pi OS), which includes `rpicam-apps`
+`dtcooper/raspberrypi-os:bookworm` (arm64 Raspberry Pi OS Bookworm), which includes `rpicam-apps`
 for CSI camera support alongside V4L2/USB cameras.
 
 ### Prerequisites
@@ -34,6 +34,18 @@ Key variables in `.env`:
 | `CAMERA_FPS` | `25` | Default capture frame rate |
 | `PULSE_ECHO_CANCEL_ENABLED` | `true` | Enable WebRTC echo cancellation |
 | `TALKBACK_PLAYBACK_GAIN` | `5.0` | Talkback audio gain |
+| `FACE_RECOGNITION_ENABLED` | `true` | Enable face recognition |
+| `FACE_RECOGNITION_KNOWN_FACES_DIR` | `./known_faces` | Host directory of known faces (one subdirectory per person, containing JPEG/PNG images). Mounted read-only into the container as `/known_faces`. |
+| `FACE_RECOGNITION_DETECT_EVERY_N_FRAMES` | `(empty = auto)` | Leave empty to detect every ~0.5s based on current FPS, or set N to force a fixed interval |
+| `FACE_RECOGNITION_MATCH_THRESHOLD` | `0.45` | Maximum face distance to count as a match (lower = stricter) |
+| `FACE_RECOGNITION_MAX_FACES` | `8` | Maximum number of faces to detect per frame |
+| `FACE_RECOGNITION_BACKEND` | `auto` | Backend preference: `auto`, `opencv`, or `dlib` |
+| `FACE_RECOGNITION_YUNET_MODEL_PATH` | `./models/face_detection_yunet_2023mar.onnx` | Path to OpenCV YuNet detector model |
+| `FACE_RECOGNITION_SFACE_MODEL_PATH` | `./models/face_recognition_sface_2021dec.onnx` | Path to OpenCV SFace embedding model |
+
+When `FACE_RECOGNITION_BACKEND=auto`, the app tries OpenCV YuNet/SFace first and falls back to dlib (`face-recognition`) if OpenCV models are unavailable.
+
+For Docker Compose, avoid `~` in `FACE_RECOGNITION_KNOWN_FACES_DIR` when running with `sudo`, because it can resolve to `/root`. Prefer `./known_faces` or an absolute host path like `/home/eric/known_faces`.
 
 ### Build
 
@@ -86,7 +98,10 @@ A native Android client is available in the `android_app/` directory. It connect
 - **Two-Way Talkback** - Send audio back to the server speakers
 - **Camera Controls** - Adjust resolution, FPS, and select camera device
 - **Audio Settings** - Control speaker volume and select audio devices
-- **System Status** - Monitor server and stream status in real-time
+- **AI Face Recognition** - Real-time face detection and identification overlay on the video feed
+- **Snapshot Capture** - Save a photo of the current frame (face overlay included)
+- **Video Recording** - Record video clips directly from the app
+- **System Status** - Monitor server, stream, and Face AI backend status in real-time
 - **SSL/TLS Support** - Secure HTTPS/WSS connections with certificate pinning
 
 ### Requirements

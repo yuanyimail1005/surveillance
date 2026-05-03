@@ -12,7 +12,26 @@ import threading
 import struct
 import re
 import queue
+import json
+import multiprocessing
+import pickle
 import werkzeug.serving
+import importlib
+
+try:
+    np = importlib.import_module('numpy')
+except Exception:
+    np = None
+
+try:
+    cv2 = importlib.import_module('cv2')
+except Exception:
+    cv2 = None
+
+try:
+    face_recognition = importlib.import_module('face_recognition')
+except Exception:
+    face_recognition = None
 
 from config import (
     VIDEO_ALLOWED_RESOLUTIONS,
@@ -42,6 +61,14 @@ from config import (
     PULSE_ECHO_CANCEL_SOURCE_NAME,
     PULSE_ECHO_CANCEL_SINK_NAME,
     SPEAKER_VOLUME_CONTROLS,
+    FACE_RECOGNITION_ENABLED,
+    FACE_RECOGNITION_KNOWN_FACES_DIR,
+    FACE_RECOGNITION_DETECT_EVERY_N_FRAMES,
+    FACE_RECOGNITION_MATCH_THRESHOLD,
+    FACE_RECOGNITION_MAX_FACES,
+    FACE_RECOGNITION_BACKEND,
+    FACE_RECOGNITION_YUNET_MODEL_PATH,
+    FACE_RECOGNITION_SFACE_MODEL_PATH,
     SERVER_HOST,
     SERVER_PORT,
     SSL_CERT_PATH,
@@ -70,6 +97,13 @@ camera_settings = {
 active_camera_device = None
 camera_device_preference = CAMERA_DEVICE
 camera_proc_lock = threading.Lock()
+
+
+def _detect_every_n_frames():
+    """Return detect-every-N-frames: ~0.5 s at the current FPS (auto), or fixed env-var override."""
+    if FACE_RECOGNITION_DETECT_EVERY_N_FRAMES is not None:
+        return FACE_RECOGNITION_DETECT_EVERY_N_FRAMES
+    return max(1, camera_settings['fps'] // 2)
 
 print("\n" + "="*60)
 print("Surveillance System - Starting")
@@ -282,9 +316,20 @@ def restart_audio_capture_process():
                 except Exception:
                     pass
             audio_proc = None
+        ensure_pulseaudio_backend_ready()
         audio_proc = start_audio()
         audio_broadcaster.set_proc(audio_proc)
         return audio_proc is not None
+
+def ensure_pulseaudio_backend_ready():
+    """Ensure the PulseAudio daemon and optional echo-cancel devices are ready."""
+    if not ensure_pulseaudio_daemon_running():
+        return False
+
+    if PULSE_ECHO_CANCEL_ENABLED:
+        _setup_pulseaudio_echo_cancel()
+
+    return True
 
 def ensure_audio_capture_process_running():
     """Ensure audio capture process exists and is alive."""
@@ -294,6 +339,10 @@ def ensure_audio_capture_process_running():
         if audio_proc is not None and audio_proc.poll() is None:
             return True
         print('⚙ Audio capture process not running, restarting...')
+        if not ensure_pulseaudio_backend_ready():
+            audio_proc = None
+            audio_broadcaster.set_proc(audio_proc)
+            return False
         audio_proc = start_audio()
         audio_broadcaster.set_proc(audio_proc)
         return audio_proc is not None
@@ -803,6 +852,10 @@ def ensure_camera_process_running():
 def start_audio():
     """Start audio recording from selected PulseAudio source."""
     try:
+        if not ensure_pulseaudio_backend_ready():
+            print('⚠ Audio failed: PulseAudio backend not ready\n')
+            return None
+
         capture_source = PULSE_CAPTURE_SOURCE_NAME
         if not capture_source or capture_source in ('@DEFAULT_SOURCE@', 'default'):
             capture_source = _resolve_default_source()
@@ -843,6 +896,605 @@ def start_audio():
         return None
 
 
+class FaceRecognitionService:
+    def __init__(
+        self,
+        enabled,
+        known_faces_dir,
+        detect_every_n_frames,
+        match_threshold,
+        max_faces,
+        backend=None,
+    ):
+        self._enabled_requested = bool(enabled)
+        self._known_faces_dir = known_faces_dir
+        self._detect_every_n_frames = max(1, int(detect_every_n_frames))
+        self._match_threshold = float(match_threshold)
+        self._max_faces = max(1, int(max_faces))
+        self._lock = threading.Lock()
+        self._frame_counter = 0
+        self._known_encodings = []
+        self._known_names = []
+        self._available = False
+        self._backend = 'none'
+        self._face_detector = None
+        self._face_recognizer = None
+        self._status_message = 'disabled by configuration'
+        self._last_result = {
+            'updated_at': None,
+            'frame_index': 0,
+            'broadcast_frame_seq': 0,
+            'image_width': 0,
+            'image_height': 0,
+            'faces': []
+        }
+
+        if not self._enabled_requested:
+            return
+
+        if np is None or cv2 is None:
+            self._status_message = 'numpy/cv2 dependencies unavailable'
+            return
+
+        backend = backend if backend is not None else FACE_RECOGNITION_BACKEND
+        if backend not in ('auto', 'opencv', 'dlib'):
+            backend = 'auto'
+
+        if backend in ('auto', 'opencv') and self._try_init_opencv_backend():
+            return
+
+        if backend in ('auto', 'dlib') and self._try_init_dlib_backend():
+            return
+
+        self._status_message = 'no available face-recognition backend (opencv or dlib)'
+
+    def _try_init_opencv_backend(self):
+        if not hasattr(cv2, 'FaceDetectorYN_create') or not hasattr(cv2, 'FaceRecognizerSF_create'):
+            return False
+
+        if not os.path.isfile(FACE_RECOGNITION_YUNET_MODEL_PATH):
+            self._status_message = f'YuNet model not found: {FACE_RECOGNITION_YUNET_MODEL_PATH}'
+            return False
+        if not os.path.isfile(FACE_RECOGNITION_SFACE_MODEL_PATH):
+            self._status_message = f'SFace model not found: {FACE_RECOGNITION_SFACE_MODEL_PATH}'
+            return False
+
+        try:
+            self._face_detector = cv2.FaceDetectorYN_create(
+                FACE_RECOGNITION_YUNET_MODEL_PATH,
+                '',
+                (320, 320),
+                0.8,
+                0.3,
+                5000,
+            )
+            self._face_recognizer = cv2.FaceRecognizerSF_create(
+                FACE_RECOGNITION_SFACE_MODEL_PATH,
+                '',
+            )
+        except Exception as e:
+            self._status_message = f'failed to initialize OpenCV face models: {e}'
+            return False
+
+        self._backend = 'opencv'
+        self._load_known_faces_opencv()
+        self._available = True
+        self._status_message = 'ready (opencv-yunet-sface)'
+        return True
+
+    def _try_init_dlib_backend(self):
+        if face_recognition is None:
+            self._status_message = 'dlib face_recognition dependency unavailable'
+            return False
+
+        self._backend = 'dlib'
+        self._load_known_faces_dlib()
+        self._available = True
+        self._status_message = 'ready (dlib)'
+        return True
+
+    def _image_file_key(self, path):
+        """Return a (relative_path, mtime, size) tuple used as a cache key."""
+        try:
+            rel_path = os.path.relpath(path, self._known_faces_dir).replace('\\', '/')
+            st = os.stat(path)
+            return (rel_path, st.st_mtime, st.st_size)
+        except OSError:
+            return (path, 0, 0)
+
+    def _cache_path(self, backend_tag):
+        return os.path.join(self._known_faces_dir, f'.face_encodings_cache_{backend_tag}.pkl')
+
+    def _load_cache(self, backend_tag):
+        """Return cached (keys, encodings, names) or (None, None, None) if invalid."""
+        path = self._cache_path(backend_tag)
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            if not isinstance(data, dict) or data.get('version') != 1:
+                return None, None, None
+            return data['keys'], data['encodings'], data['names']
+        except Exception:
+            return None, None, None
+
+    def _save_cache(self, backend_tag, keys, encodings, names):
+        path = self._cache_path(backend_tag)
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump({'version': 1, 'keys': keys, 'encodings': encodings, 'names': names}, f)
+        except Exception:
+            pass
+
+    def _collect_image_paths(self, root):
+        """Return sorted list of (person_name, image_path) pairs under root."""
+        image_patterns = ('*.jpg', '*.jpeg', '*.png')
+        pairs = []
+        for person_name in sorted(os.listdir(root)):
+            person_dir = os.path.join(root, person_name)
+            if not os.path.isdir(person_dir):
+                continue
+            for pattern in image_patterns:
+                for p in sorted(glob.glob(os.path.join(person_dir, pattern))):
+                    pairs.append((person_name, p))
+        return pairs
+
+    def _load_known_faces_dlib(self):
+        root = self._known_faces_dir
+        if not os.path.isdir(root):
+            return
+
+        pairs = self._collect_image_paths(root)
+        current_keys = [self._image_file_key(p) for _, p in pairs]
+
+        cached_keys, cached_encodings, cached_names = self._load_cache('dlib')
+        if cached_keys == current_keys and cached_encodings is not None:
+            self._known_encodings = cached_encodings
+            self._known_names = cached_names
+            print(f'✓ Face encodings loaded from cache ({len(cached_names)} faces)')
+            return
+
+        print(f'⚙ Computing dlib face encodings for {len(pairs)} images (this may take a while)...')
+        new_encodings = []
+        new_names = []
+        new_keys = []
+        for person_name, image_path in pairs:
+            try:
+                image = face_recognition.load_image_file(image_path)
+                encodings = face_recognition.face_encodings(image)
+                if not encodings:
+                    print(f'  ⚠ dlib: no face detected in {image_path}')
+                    continue
+                new_encodings.append(encodings[0])
+                new_names.append(person_name)
+                new_keys.append(self._image_file_key(image_path))
+            except Exception as e:
+                print(f'  ⚠ dlib: error processing {image_path}: {e}')
+                continue
+
+        self._known_encodings = new_encodings
+        self._known_names = new_names
+        self._save_cache('dlib', current_keys, new_encodings, new_names)
+        print(f'✓ Face encodings computed and cached ({len(new_names)} faces)')
+
+    def _load_known_faces_opencv(self):
+        root = self._known_faces_dir
+        if not os.path.isdir(root):
+            return
+
+        pairs = self._collect_image_paths(root)
+        current_keys = [self._image_file_key(p) for _, p in pairs]
+
+        cached_keys, cached_encodings, cached_names = self._load_cache('opencv')
+        if cached_keys == current_keys and cached_encodings is not None:
+            self._known_encodings = cached_encodings
+            self._known_names = cached_names
+            print(f'✓ Face encodings loaded from cache ({len(cached_names)} faces)')
+            return
+
+        print(f'⚙ Computing opencv face encodings for {len(pairs)} images...')
+        new_encodings = []
+        new_names = []
+        new_keys = []
+        for person_name, image_path in pairs:
+            try:
+                image_bgr = cv2.imread(image_path)
+                if image_bgr is None:
+                    print(f'  ⚠ opencv: failed to read image {image_path}')
+                    continue
+
+                h, w = image_bgr.shape[:2]
+                self._face_detector.setInputSize((w, h))
+                _, detections = self._face_detector.detect(image_bgr)
+                if detections is None or len(detections) == 0:
+                    print(f'  ⚠ opencv: no face detected in {image_path}')
+                    continue
+
+                # Use the highest confidence detection to build one reference embedding.
+                best = max(detections, key=lambda d: float(d[14]) if len(d) > 14 else 0.0)
+                aligned = self._face_recognizer.alignCrop(image_bgr, best)
+                feature = self._face_recognizer.feature(aligned)
+                if feature is None:
+                    print(f'  ⚠ opencv: feature extraction returned None for {image_path}')
+                    continue
+
+                vec = np.asarray(feature, dtype=np.float32).flatten()
+                norm = float(np.linalg.norm(vec))
+                if norm <= 1e-8:
+                    print(f'  ⚠ opencv: zero-norm feature vector for {image_path}')
+                    continue
+                vec = vec / norm
+
+                new_encodings.append(vec)
+                new_names.append(person_name)
+                new_keys.append(self._image_file_key(image_path))
+            except Exception as e:
+                print(f'  ⚠ opencv: error processing {image_path}: {e}')
+                continue
+
+        self._known_encodings = new_encodings
+        self._known_names = new_names
+        self._save_cache('opencv', current_keys, new_encodings, new_names)
+        print(f'✓ Face encodings computed and cached ({len(new_names)} faces)')
+
+    def process_frame(self, frame_bytes, frame_seq=0):
+        if not self._available or np is None or cv2 is None:
+            return
+
+        self._frame_counter += 1
+        if self._frame_counter % self._detect_every_n_frames != 0:
+            return
+
+        np_buf = np.frombuffer(frame_bytes, dtype=np.uint8)
+        frame_bgr = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            return
+
+        if self._backend == 'opencv':
+            self._process_frame_opencv(frame_bgr, frame_seq)
+            return
+
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+        try:
+            locations = face_recognition.face_locations(frame_rgb, model='hog')
+        except Exception:
+            return
+
+        if self._max_faces:
+            locations = locations[:self._max_faces]
+
+        try:
+            encodings = face_recognition.face_encodings(frame_rgb, locations, model='small')
+        except Exception:
+            encodings = []
+
+        faces = []
+        for index, location in enumerate(locations):
+            top, right, bottom, left = location
+            name = 'Unknown'
+            confidence = 0.0
+
+            if index < len(encodings) and self._known_encodings:
+                distances = face_recognition.face_distance(self._known_encodings, encodings[index])
+                if len(distances) > 0:
+                    best_idx = int(np.argmin(distances))
+                    best_distance = float(distances[best_idx])
+                    if best_distance <= self._match_threshold:
+                        name = self._known_names[best_idx]
+                        confidence = max(0.0, min(1.0, 1.0 - best_distance))
+
+            faces.append({
+                'name': name,
+                'confidence': round(confidence, 3),
+                'left': int(left),
+                'top': int(top),
+                'right': int(right),
+                'bottom': int(bottom),
+            })
+
+        with self._lock:
+            self._last_result = {
+                'updated_at': time.time(),
+                'frame_index': self._frame_counter,
+                'broadcast_frame_seq': frame_seq,
+                'image_width': int(frame_bgr.shape[1]),
+                'image_height': int(frame_bgr.shape[0]),
+                'faces': faces,
+            }
+
+    def _process_frame_opencv(self, frame_bgr, frame_seq=0):
+        h, w = frame_bgr.shape[:2]
+
+        try:
+            self._face_detector.setInputSize((w, h))
+            _, detections = self._face_detector.detect(frame_bgr)
+        except Exception:
+            return
+
+        if detections is None:
+            detections = []
+        if self._max_faces:
+            detections = detections[:self._max_faces]
+
+        faces = []
+        known_matrix = None
+        if self._known_encodings:
+            known_matrix = np.vstack(self._known_encodings)
+
+        for detection in detections:
+            x, y, bw, bh = detection[:4]
+            left = max(0, int(round(x)))
+            top = max(0, int(round(y)))
+            right = min(w - 1, int(round(x + bw)))
+            bottom = min(h - 1, int(round(y + bh)))
+
+            name = 'Unknown'
+            confidence = 0.0
+
+            try:
+                aligned = self._face_recognizer.alignCrop(frame_bgr, detection)
+                feature = self._face_recognizer.feature(aligned)
+            except Exception:
+                feature = None
+
+            if feature is not None and known_matrix is not None and len(known_matrix) > 0:
+                vec = np.asarray(feature, dtype=np.float32).flatten()
+                norm = float(np.linalg.norm(vec))
+                if norm > 1e-8:
+                    vec = vec / norm
+                    similarities = known_matrix.dot(vec)
+                    best_idx = int(np.argmax(similarities))
+                    best_similarity = float(similarities[best_idx])
+                    distance = max(0.0, 1.0 - best_similarity)
+                    if distance <= self._match_threshold:
+                        name = self._known_names[best_idx]
+                        confidence = max(0.0, min(1.0, best_similarity))
+
+            faces.append({
+                'name': name,
+                'confidence': round(confidence, 3),
+                'left': left,
+                'top': top,
+                'right': right,
+                'bottom': bottom,
+            })
+
+        with self._lock:
+            self._last_result = {
+                'updated_at': time.time(),
+                'frame_index': self._frame_counter,
+                'broadcast_frame_seq': frame_seq,
+                'image_width': int(w),
+                'image_height': int(h),
+                'faces': faces,
+            }
+
+    def is_processing_enabled(self):
+        return self._enabled_requested and self._available
+
+    def get_push_payload_if_new(self, last_frame_index):
+        """Return a face-data push payload if a new detection result is available, else None."""
+        with self._lock:
+            current_idx = self._last_result.get('frame_index', -1)
+        if current_idx == last_frame_index:
+            return None
+        return self.get_status()
+
+    def get_status(self):
+        with self._lock:
+            latest = dict(self._last_result)
+
+        return {
+            'enabled': self._enabled_requested,
+            'available': self._available,
+            'backend': self._backend,
+            'message': self._status_message,
+            'known_faces_count': len(self._known_names),
+            'detect_every_n_frames': self._detect_every_n_frames,
+            'match_threshold': self._match_threshold,
+            'max_faces': self._max_faces,
+            'result': latest,
+        }
+
+
+def _queue_replace_latest(q, item):
+    """Put item into a bounded queue, dropping one stale entry when full."""
+    try:
+        q.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+
+    try:
+        q.get_nowait()
+    except queue.Empty:
+        pass
+
+    try:
+        q.put_nowait(item)
+    except queue.Full:
+        pass
+
+
+def _face_recognition_worker(
+    frame_queue,
+    result_queue,
+    stop_event,
+    enabled,
+    known_faces_dir,
+    detect_every_n_frames,
+    match_threshold,
+    max_faces,
+    backend=None,
+):
+    service = FaceRecognitionService(
+        enabled=enabled,
+        known_faces_dir=known_faces_dir,
+        detect_every_n_frames=detect_every_n_frames,
+        match_threshold=match_threshold,
+        max_faces=max_faces,
+        backend=backend,
+    )
+
+    _queue_replace_latest(result_queue, service.get_status())
+    last_sent_idx = -1
+
+    while not stop_event.is_set():
+        try:
+            item = frame_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        if item is None:
+            break
+
+        frame, frame_seq = item
+        service.process_frame(frame, frame_seq)
+        payload = service.get_push_payload_if_new(last_sent_idx)
+        if payload is None:
+            continue
+        last_sent_idx = payload['result'].get('frame_index', last_sent_idx)
+        _queue_replace_latest(result_queue, payload)
+
+
+class FaceRecognitionProcessBridge:
+    def __init__(
+        self,
+        enabled,
+        known_faces_dir,
+        detect_every_n_frames,
+        match_threshold,
+        max_faces,
+        backend=None,
+    ):
+        self._enabled_requested = bool(enabled)
+        self._requested_backend = backend
+        self._lock = threading.Lock()
+        self._stop_collector = threading.Event()
+
+        self._frame_queue = None
+        self._result_queue = None
+        self._stop_event = None
+        self._worker = None
+        self._collector = None
+
+        self._last_status = {
+            'enabled': self._enabled_requested,
+            'available': False,
+            'message': 'disabled by configuration',
+            'known_faces_count': 0,
+            'detect_every_n_frames': max(1, int(detect_every_n_frames)),
+            'match_threshold': float(match_threshold),
+            'max_faces': max(1, int(max_faces)),
+            'result': {
+                'updated_at': None,
+                'frame_index': 0,
+                'broadcast_frame_seq': 0,
+                'image_width': 0,
+                'image_height': 0,
+                'faces': [],
+            },
+        }
+
+        if not self._enabled_requested:
+            return
+
+        try:
+            ctx = multiprocessing.get_context('fork')
+        except ValueError:
+            with self._lock:
+                self._last_status['message'] = 'multiprocessing fork context unavailable'
+            return
+
+        self._frame_queue = ctx.Queue(maxsize=1)
+        self._result_queue = ctx.Queue(maxsize=4)
+        self._stop_event = ctx.Event()
+
+        self._worker = ctx.Process(
+            target=_face_recognition_worker,
+            args=(
+                self._frame_queue,
+                self._result_queue,
+                self._stop_event,
+                enabled,
+                known_faces_dir,
+                detect_every_n_frames,
+                match_threshold,
+                max_faces,
+                backend,
+            ),
+            daemon=True,
+            name='face-recognition-worker',
+        )
+        self._worker.start()
+
+        self._collector = threading.Thread(
+            target=self._collect_results,
+            daemon=True,
+            name='face-recognition-results',
+        )
+        self._collector.start()
+
+    def _collect_results(self):
+        while not self._stop_collector.is_set():
+            if self._result_queue is None:
+                return
+            try:
+                status = self._result_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            if status is None:
+                return
+
+            with self._lock:
+                self._last_status = status
+
+    def accepts_frames(self):
+        return self._frame_queue is not None and self._worker is not None and self._worker.is_alive()
+
+    def process_frame(self, frame_bytes, frame_seq=0):
+        if not self.accepts_frames():
+            return
+        _queue_replace_latest(self._frame_queue, (frame_bytes, frame_seq))
+
+    def is_processing_enabled(self):
+        with self._lock:
+            status = dict(self._last_status)
+        return bool(status.get('enabled') and status.get('available'))
+
+    def get_push_payload_if_new(self, last_frame_index):
+        """Return a face-data push payload if a new detection result is available, else None."""
+        with self._lock:
+            current_idx = self._last_status.get('result', {}).get('frame_index', -1)
+        if current_idx == last_frame_index:
+            return None
+        return self.get_status()
+
+    def get_status(self):
+        with self._lock:
+            status = dict(self._last_status)
+            status['result'] = dict(self._last_status.get('result', {}))
+        return status
+
+    def stop(self):
+        self._stop_collector.set()
+
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+        if self._frame_queue is not None:
+            _queue_replace_latest(self._frame_queue, None)
+
+        if self._worker is not None and self._worker.is_alive():
+            self._worker.join(timeout=2)
+            if self._worker.is_alive():
+                self._worker.terminate()
+
+        if self._collector is not None and self._collector.is_alive():
+            self._collector.join(timeout=1)
+
+
 class FrameBroadcaster:
     """
     One background thread continuously drains a subprocess stdout and
@@ -851,12 +1503,14 @@ class FrameBroadcaster:
     the producer process never blocks.
     """
 
-    def __init__(self, name, read_frames_fn):
+    def __init__(self, name, read_frames_fn, on_frame_fn=None):
         self.name = name
         self._read_frames = read_frames_fn
+        self._on_frame = on_frame_fn
         self._lock = threading.Lock()
         self._subscribers = {}  # token_id -> queue.Queue
         self._proc = None
+        self._frame_seq = 0
         t = threading.Thread(target=self._run, daemon=True, name=f'broadcaster-{name}')
         t.start()
 
@@ -877,12 +1531,12 @@ class FrameBroadcaster:
         with self._lock:
             self._subscribers.pop(id(token), None)
 
-    def _broadcast(self, frame):
+    def _broadcast(self, seq, frame):
         with self._lock:
             queues = list(self._subscribers.values())
         for q in queues:
             try:
-                q.put_nowait(frame)
+                q.put_nowait((seq, frame))
             except queue.Full:
                 pass  # slow client: drop frame rather than block
 
@@ -899,7 +1553,11 @@ class FrameBroadcaster:
                         current_proc = self._proc
                     if current_proc is not proc:
                         break  # proc was replaced; restart outer loop
-                    self._broadcast(frame)
+                    self._frame_seq += 1
+                    seq = self._frame_seq
+                    if self._on_frame is not None:
+                        self._on_frame(frame, seq)
+                    self._broadcast(seq, frame)
             except Exception as e:
                 print(f'[{self.name}] reader error: {e}')
                 time.sleep(0.05)
@@ -949,7 +1607,19 @@ camera_proc = start_camera(
 )
 audio_proc = start_audio()
 
-video_broadcaster = FrameBroadcaster('video', _video_frames_gen)
+face_recognition_service = FaceRecognitionProcessBridge(
+    enabled=FACE_RECOGNITION_ENABLED,
+    known_faces_dir=FACE_RECOGNITION_KNOWN_FACES_DIR,
+    detect_every_n_frames=_detect_every_n_frames(),
+    match_threshold=FACE_RECOGNITION_MATCH_THRESHOLD,
+    max_faces=FACE_RECOGNITION_MAX_FACES,
+)
+
+video_broadcaster = FrameBroadcaster(
+    'video',
+    _video_frames_gen,
+    on_frame_fn=face_recognition_service.process_frame if face_recognition_service.accepts_frames() else None,
+)
 audio_broadcaster = FrameBroadcaster('audio', _audio_chunks_gen)
 video_broadcaster.set_proc(camera_proc)
 audio_broadcaster.set_proc(audio_proc)
@@ -983,17 +1653,23 @@ def video_feed_socket(ws):
 
     print('📹 Video socket connected')
     token, q = video_broadcaster.subscribe()
+    last_sent_face_idx = -1
     try:
         while True:
             try:
-                frame = q.get(timeout=5.0)
+                seq, frame = q.get(timeout=5.0)
             except queue.Empty:
                 if camera_proc is None or camera_proc.poll() is not None:
                     if not ensure_camera_process_running():
                         print('📹 Video socket: camera unavailable after restart attempt')
                         break
                 continue
+            ws.send(json.dumps({'type': 'frame_meta', 'broadcast_frame_seq': seq}))
             ws.send(frame)
+            payload = face_recognition_service.get_push_payload_if_new(last_sent_face_idx)
+            if payload is not None:
+                last_sent_face_idx = payload['result'].get('frame_index', last_sent_face_idx)
+                ws.send(json.dumps({'type': 'face_data', **payload}))
     except Exception as e:
         print(f'📹 Video socket closed: {e}')
     finally:
@@ -1014,7 +1690,7 @@ def audio_feed_socket(ws):
     try:
         while True:
             try:
-                chunk = q.get(timeout=5.0)
+                _, chunk = q.get(timeout=5.0)
             except queue.Empty:
                 if audio_proc is None or audio_proc.poll() is not None:
                     if not ensure_audio_capture_process_running():
@@ -1170,6 +1846,7 @@ def get_camera_settings():
 
 @app.route('/camera_settings', methods=['POST'])
 def set_camera_settings():
+    global face_recognition_service
     payload = request.get_json(silent=True) or {}
     requested_camera_device = payload.get('camera_device')
 
@@ -1222,11 +1899,28 @@ def set_camera_settings():
             'message': 'Camera settings unchanged'
         })
 
+    old_fps = camera_settings['fps']
+
     if not restart_camera_process(normalized):
         return jsonify({
             'status': 'error',
             'message': 'Failed to restart camera process with the requested settings'
         }), 500
+
+    if camera_settings['fps'] != old_fps and FACE_RECOGNITION_ENABLED:
+        with face_recognition_service_lock:
+            old_svc = face_recognition_service
+            old_svc.stop()
+            new_svc = FaceRecognitionProcessBridge(
+                enabled=old_svc._enabled_requested,
+                known_faces_dir=FACE_RECOGNITION_KNOWN_FACES_DIR,
+                detect_every_n_frames=_detect_every_n_frames(),
+                match_threshold=FACE_RECOGNITION_MATCH_THRESHOLD,
+                max_faces=FACE_RECOGNITION_MAX_FACES,
+                backend=old_svc._requested_backend,
+            )
+            face_recognition_service = new_svc
+            video_broadcaster._on_frame = new_svc.process_frame if new_svc.accepts_frames() else None
 
     return jsonify({
         'status': 'ok',
@@ -1252,9 +1946,47 @@ def status():
         'camera_height': camera_settings['height'],
         'camera_fps': camera_settings['fps'],
         'audio_player_nice': AUDIO_PLAYER_NICE,
+        'face_recognition_enabled': FACE_RECOGNITION_ENABLED,
         'speaker_volume': speaker_volume,
         'speaker_control': speaker_control
     })
+
+@app.route('/face_status', methods=['GET'])
+def face_status():
+    return jsonify(face_recognition_service.get_status())
+
+face_recognition_service_lock = threading.Lock()
+
+@app.route('/face_settings', methods=['POST'])
+def set_face_settings():
+    global face_recognition_service
+
+    payload = request.get_json(silent=True) or {}
+
+    if 'enabled' not in payload and 'backend' not in payload:
+        return jsonify({'status': 'error', 'message': 'Provide enabled and/or backend'}), 400
+
+    enabled = bool(payload.get('enabled', True))
+    backend = str(payload.get('backend', 'auto')).lower()
+    if backend not in ('auto', 'opencv', 'dlib'):
+        return jsonify({'status': 'error', 'message': 'backend must be auto, opencv, or dlib'}), 400
+
+    with face_recognition_service_lock:
+        old_service = face_recognition_service
+        old_service.stop()
+
+        new_service = FaceRecognitionProcessBridge(
+            enabled=enabled,
+            known_faces_dir=FACE_RECOGNITION_KNOWN_FACES_DIR,
+            detect_every_n_frames=_detect_every_n_frames(),
+            match_threshold=FACE_RECOGNITION_MATCH_THRESHOLD,
+            max_faces=FACE_RECOGNITION_MAX_FACES,
+            backend=backend,
+        )
+        face_recognition_service = new_service
+        video_broadcaster._on_frame = new_service.process_frame if new_service.accepts_frames() else None
+
+    return jsonify({'status': 'ok', **face_recognition_service.get_status()})
 
 @app.route('/server_audio_devices', methods=['GET'])
 def server_audio_devices():
@@ -1374,16 +2106,19 @@ def select_server_audio_devices():
 if __name__ == '__main__':
     print(f"Server: https://{SERVER_HOST}:{SERVER_PORT}\n")
     try:
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(SSL_CERT_PATH, SSL_KEY_PATH)
         app.run(
             host=SERVER_HOST,
             port=SERVER_PORT,
             debug=False,
             threaded=True,
-            ssl_context=(SSL_CERT_PATH, SSL_KEY_PATH)
+            ssl_context=ssl_ctx
         )
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
+        face_recognition_service.stop()
         stop_pulse_pipeline()
         _teardown_pulseaudio_echo_cancel()
         stop_pulseaudio_daemon_if_started_by_app()

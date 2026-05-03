@@ -122,6 +122,18 @@ class StatusFragment : Fragment() {
                 binding.cameraFpsInfo.text = "${status.cameraFps} fps"
             }
         }
+
+        viewModel?.faceStatus?.observe(viewLifecycleOwner) { status ->
+            if (status != null) {
+                val statusText = if (status.enabled) {
+                    val count = status.knownFacesCount ?: 0
+                    if (status.available) "Active (${status.backend}), $count profiles" else "Unavailable: ${status.message ?: "not ready"}"
+                } else {
+                    "Disabled"
+                }
+                binding.faceAiInfo.text = statusText
+            }
+        }
     }
 
     override fun onDestroyView() {

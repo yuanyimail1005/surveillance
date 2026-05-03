@@ -13,6 +13,8 @@
     <string name="audio_disabled">Audio disabled</string>
     <string name="talkback_button">Talkback</string>
     <string name="talkback_recording">Recording…</string>
+    <string name="snapshot">Snap</string>
+    <string name="record">Rec</string>
 
     <!-- Settings Fragment -->
     <string name="server_address">Server Address</string>

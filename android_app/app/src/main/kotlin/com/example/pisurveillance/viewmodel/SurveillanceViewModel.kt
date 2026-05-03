@@ -12,10 +12,12 @@ import com.example.pisurveillance.models.*
 import com.example.pisurveillance.utils.PreferencesManager
 import com.example.pisurveillance.websocket.AudioStreamManager
 import com.example.pisurveillance.websocket.TalkbackManager
+import com.example.pisurveillance.websocket.VideoFrame
 import com.example.pisurveillance.websocket.VideoStreamManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.io.FileOutputStream
 
 /**
  * Main ViewModel for surveillance system
@@ -25,6 +27,13 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
 
     private val preferencesManager = PreferencesManager(application)
     private var apiService: SurveillanceService? = null
+
+    // Recording state
+    private val _isRecordingVideo = MutableLiveData(false)
+    val isRecordingVideo: LiveData<Boolean> = _isRecordingVideo
+    
+    private var videoFileStream: FileOutputStream? = null
+    private var currentVideoFileName: String? = null
 
     // Server connection state
     private val _serverUrl = MutableLiveData("")
@@ -69,14 +78,20 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private var talkbackManager: TalkbackManager? = null
 
     // Shared LiveData for UI
-    private val _videoFrames = MutableLiveData<Bitmap?>(null)
-    val videoFrames: LiveData<Bitmap?> = _videoFrames
+    private val _videoFrames = MutableLiveData<VideoFrame?>(null)
+    val videoFrames: LiveData<VideoFrame?> = _videoFrames
 
     private val _audioConnected = MutableLiveData(false)
     val audioConnected: LiveData<Boolean> = _audioConnected
 
     private val _talkbackConnected = MutableLiveData(false)
     val talkbackConnected: LiveData<Boolean> = _talkbackConnected
+
+    private val _faceData = MutableLiveData<FaceAiData?>(null)
+    val faceData: LiveData<FaceAiData?> = _faceData
+
+    private val _faceStatus = MutableLiveData<FaceStatusResponse?>(null)
+    val faceStatus: LiveData<FaceStatusResponse?> = _faceStatus
 
     private var initializationJob: Job? = null
     private var observationJob: Job? = null
@@ -115,7 +130,34 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
         observationJob?.cancel()
         observationJob = viewModelScope.launch {
             launch {
-                videoStreamManager?.frames?.collect { _videoFrames.postValue(it) }
+                videoStreamManager?.frames?.collect { frame ->
+                    _videoFrames.postValue(frame)
+                    // If recording, save the raw data to the stream
+                    if (frame != null && _isRecordingVideo.value == true) {
+                        saveFrameToRecording(frame.rawData)
+                    }
+                }
+            }
+            launch {
+                videoStreamManager?.faceData?.collect { data ->
+                    _faceData.postValue(data)
+                    
+                    // Update configuration status ONLY if the WebSocket message contains 
+                    // actual configuration data (enabled, available, backend).
+                    // Many WebSocket pushes only contain detection results to save bandwidth.
+                    if (data != null && data.backend != null) {
+                        val currentStatus = _faceStatus.value
+                        _faceStatus.postValue(FaceStatusResponse(
+                            enabled = data.enabled,
+                            available = data.available,
+                            backend = data.backend,
+                            message = data.message ?: currentStatus?.message,
+                            knownFacesCount = data.knownFacesCount ?: currentStatus?.knownFacesCount,
+                            broadcastFrameSeq = data.broadcastFrameSeq,
+                            result = data.result
+                        ))
+                    }
+                }
             }
             launch {
                 audioStreamManager?.isConnected?.collect { _audioConnected.postValue(it) }
@@ -159,6 +201,7 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                 fetchCameraSettings()
                 fetchAudioDevices()
                 fetchSpeakerVolume()
+                fetchFaceStatus()
 
                 videoStreamManager?.connect()
                 audioStreamManager?.connect()
@@ -193,6 +236,9 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
             } else {
                 _connectionError.postValue("Status: ${response.code()}")
             }
+            
+            // Also refresh face status during regular status updates
+            fetchFaceStatus()
         } catch (e: Exception) {
             Timber.e(e, "Error fetching server status")
             _connectionError.postValue(e.message)
@@ -335,6 +381,86 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      */
     fun stopTalkback() {
         talkbackManager?.disconnect()
+    }
+
+    /**
+     * Start video recording
+     */
+    fun startVideoRecording() {
+        if (_isRecordingVideo.value == true) return
+        
+        try {
+            val name = "recording_${System.currentTimeMillis()}.mjpeg"
+            val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val file = java.io.File(downloadsDir, name)
+            videoFileStream = FileOutputStream(file)
+            currentVideoFileName = name
+            _isRecordingVideo.postValue(true)
+            Timber.d("Recording started: $name")
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to start recording")
+        }
+    }
+
+    /**
+     * Stop video recording
+     */
+    fun stopVideoRecording() {
+        if (_isRecordingVideo.value == false) return
+        
+        _isRecordingVideo.postValue(false)
+        try {
+            videoFileStream?.flush()
+            videoFileStream?.close()
+            Timber.d("Recording stopped: $currentVideoFileName")
+        } catch (e: Exception) {
+            Timber.e(e, "Error closing video stream")
+        }
+        videoFileStream = null
+    }
+
+    private fun saveFrameToRecording(data: ByteArray) {
+        try {
+            videoFileStream?.write(data)
+        } catch (e: Exception) {
+            Timber.e(e, "Error writing frame to file")
+            stopVideoRecording()
+        }
+    }
+
+    /**
+     * Fetch face recognition status
+     */
+    fun fetchFaceStatus() {
+        viewModelScope.launch {
+            try {
+                val service = apiService ?: return@launch
+                val response = service.getFaceStatus()
+                if (response.isSuccessful) {
+                    _faceStatus.postValue(response.body())
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error fetching face status")
+            }
+        }
+    }
+
+    /**
+     * Update face recognition settings
+     */
+    fun updateFaceSettings(enabled: Boolean, backend: String = "auto") {
+        viewModelScope.launch {
+            try {
+                val service = apiService ?: return@launch
+                val request = FaceSettingsRequest(enabled, backend)
+                val response = service.updateFaceSettings(request)
+                if (response.isSuccessful) {
+                    fetchFaceStatus()
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error updating face settings")
+            }
+        }
     }
 
     /**
