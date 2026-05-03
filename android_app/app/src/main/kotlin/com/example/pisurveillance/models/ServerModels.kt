@@ -160,6 +160,16 @@ data class VolumeResponse(
 )
 
 /**
+ * Metadata for upcoming video frame
+ */
+data class FrameMeta(
+    @SerializedName("type")
+    val type: String = "frame_meta",
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long
+)
+
+/**
  * Individual face detection result
  */
 data class FaceDetection(
@@ -185,6 +195,10 @@ data class FaceDetectionResult(
     val imageWidth: Int,
     @SerializedName("image_height")
     val imageHeight: Int,
+    @SerializedName("frame_index")
+    val frameIndex: Long?,
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long?,
     @SerializedName("faces")
     val faces: List<FaceDetection>
 )
@@ -205,6 +219,8 @@ data class FaceAiData(
     val message: String?,
     @SerializedName("known_faces_count")
     val knownFacesCount: Int?,
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long?,
     @SerializedName("result")
     val result: FaceDetectionResult?
 )
@@ -223,6 +239,8 @@ data class FaceStatusResponse(
     val message: String?,
     @SerializedName("known_faces_count")
     val knownFacesCount: Int?,
+    @SerializedName("broadcast_frame_seq")
+    val broadcastFrameSeq: Long?,
     @SerializedName("result")
     val result: FaceDetectionResult?
 )

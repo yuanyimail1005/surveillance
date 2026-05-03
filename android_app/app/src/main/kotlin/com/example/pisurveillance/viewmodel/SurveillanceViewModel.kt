@@ -12,10 +12,12 @@ import com.example.pisurveillance.models.*
 import com.example.pisurveillance.utils.PreferencesManager
 import com.example.pisurveillance.websocket.AudioStreamManager
 import com.example.pisurveillance.websocket.TalkbackManager
+import com.example.pisurveillance.websocket.VideoFrame
 import com.example.pisurveillance.websocket.VideoStreamManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.io.FileOutputStream
 
 /**
  * Main ViewModel for surveillance system
@@ -25,6 +27,13 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
 
     private val preferencesManager = PreferencesManager(application)
     private var apiService: SurveillanceService? = null
+
+    // Recording state
+    private val _isRecordingVideo = MutableLiveData(false)
+    val isRecordingVideo: LiveData<Boolean> = _isRecordingVideo
+    
+    private var videoFileStream: FileOutputStream? = null
+    private var currentVideoFileName: String? = null
 
     // Server connection state
     private val _serverUrl = MutableLiveData("")
@@ -69,8 +78,8 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private var talkbackManager: TalkbackManager? = null
 
     // Shared LiveData for UI
-    private val _videoFrames = MutableLiveData<Bitmap?>(null)
-    val videoFrames: LiveData<Bitmap?> = _videoFrames
+    private val _videoFrames = MutableLiveData<VideoFrame?>(null)
+    val videoFrames: LiveData<VideoFrame?> = _videoFrames
 
     private val _audioConnected = MutableLiveData(false)
     val audioConnected: LiveData<Boolean> = _audioConnected
@@ -121,7 +130,13 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
         observationJob?.cancel()
         observationJob = viewModelScope.launch {
             launch {
-                videoStreamManager?.frames?.collect { _videoFrames.postValue(it) }
+                videoStreamManager?.frames?.collect { frame ->
+                    _videoFrames.postValue(frame)
+                    // If recording, save the raw data to the stream
+                    if (frame != null && _isRecordingVideo.value == true) {
+                        saveFrameToRecording(frame.rawData)
+                    }
+                }
             }
             launch {
                 videoStreamManager?.faceData?.collect { data ->
@@ -138,6 +153,7 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                             backend = data.backend,
                             message = data.message ?: currentStatus?.message,
                             knownFacesCount = data.knownFacesCount ?: currentStatus?.knownFacesCount,
+                            broadcastFrameSeq = data.broadcastFrameSeq,
                             result = data.result
                         ))
                     }
@@ -365,6 +381,51 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      */
     fun stopTalkback() {
         talkbackManager?.disconnect()
+    }
+
+    /**
+     * Start video recording
+     */
+    fun startVideoRecording() {
+        if (_isRecordingVideo.value == true) return
+        
+        try {
+            val name = "recording_${System.currentTimeMillis()}.mjpeg"
+            val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val file = java.io.File(downloadsDir, name)
+            videoFileStream = FileOutputStream(file)
+            currentVideoFileName = name
+            _isRecordingVideo.postValue(true)
+            Timber.d("Recording started: $name")
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to start recording")
+        }
+    }
+
+    /**
+     * Stop video recording
+     */
+    fun stopVideoRecording() {
+        if (_isRecordingVideo.value == false) return
+        
+        _isRecordingVideo.postValue(false)
+        try {
+            videoFileStream?.flush()
+            videoFileStream?.close()
+            Timber.d("Recording stopped: $currentVideoFileName")
+        } catch (e: Exception) {
+            Timber.e(e, "Error closing video stream")
+        }
+        videoFileStream = null
+    }
+
+    private fun saveFrameToRecording(data: ByteArray) {
+        try {
+            videoFileStream?.write(data)
+        } catch (e: Exception) {
+            Timber.e(e, "Error writing frame to file")
+            stopVideoRecording()
+        }
     }
 
     /**

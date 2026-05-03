@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:keepScreenOn="true"
     tools:context=".ui.fragments.VideoFragment">
 
     <!-- Video Display -->
@@ -60,12 +62,51 @@
 
         </LinearLayout>
 
-        <!-- Talkback Button -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/talkback_button"
+        <!-- Recording Status -->
+        <TextView
+            android:id="@+id/recording_status"
             android:layout_width="match_parent"
-            android:layout_height="@dimen/button_height"
-            android:text="@string/talkback_button" />
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="@dimen/spacing_small"
+            android:gravity="center"
+            android:text="Ready to record"
+            android:textColor="@color/text_secondary"
+            android:visibility="gone" />
+
+        <!-- Talkback and Capture Controls -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/snapshot_button"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="@dimen/button_height"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="@string/snapshot"
+                app:icon="@android:drawable/ic_menu_camera" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/record_button"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="@dimen/button_height"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="@string/record"
+                app:icon="@android:drawable/button_onoff_indicator_on" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/talkback_button"
+                android:layout_width="0dp"
+                android:layout_height="@dimen/button_height"
+                android:layout_weight="1.5"
+                android:text="@string/talkback_button" />
+
+        </LinearLayout>
 
     </LinearLayout>
 

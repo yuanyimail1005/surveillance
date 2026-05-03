@@ -3,6 +3,8 @@ package com.example.pisurveillance.websocket
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import okhttp3.*
@@ -19,6 +21,10 @@ class AudioStreamManager(
 ) {
     private var webSocket: WebSocket? = null
     private var audioTrack: AudioTrack? = null
+    
+    private val playbackScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val audioChannel = Channel<ByteArray>(Channel.UNLIMITED)
+    private var playbackJob: Job? = null
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected
@@ -35,11 +41,29 @@ class AudioStreamManager(
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     }
 
+    init {
+        startPlaybackLoop()
+    }
+
+    private fun startPlaybackLoop() {
+        playbackJob?.cancel()
+        playbackJob = playbackScope.launch {
+            for (data in audioChannel) {
+                if (!isActive) break
+                writeToAudioTrack(data)
+            }
+        }
+    }
+
     /**
      * Connect to audio feed WebSocket and initialize playback
      */
     fun connect() {
         if (webSocket != null) return
+        
+        if (playbackJob == null || !playbackJob!!.isActive) {
+            startPlaybackLoop()
+        }
 
         try {
             val wsUrl = serverUrl.replace(Regex("^https://"), "wss://")
@@ -53,11 +77,12 @@ class AudioStreamManager(
                     Timber.d("Audio WebSocket connected")
                     _isConnected.value = true
                     _errorMessage.value = null
-                    startPlayback()
+                    ensureAudioTrackReady()
                 }
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    playAudioFrame(bytes.toByteArray())
+                    // Non-blocking send to the playback loop
+                    audioChannel.trySend(bytes.toByteArray())
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -80,11 +105,11 @@ class AudioStreamManager(
     private fun handleConnectionLoss(error: String?) {
         _isConnected.value = false
         _errorMessage.value = error
-        stopAudioPlayback()
+        pauseAudioTrack()
         webSocket = null
     }
 
-    private fun startPlayback() {
+    private fun ensureAudioTrackReady() {
         try {
             if (audioTrack == null) {
                 val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -98,7 +123,7 @@ class AudioStreamManager(
                         .setChannelMask(CHANNEL_CONFIG)
                         .setEncoding(AUDIO_FORMAT)
                         .build(),
-                    bufferSize.coerceAtLeast(1024),
+                    bufferSize.coerceAtLeast(4096), // Larger buffer for stability
                     AudioTrack.MODE_STREAM,
                     android.media.AudioManager.AUDIO_SESSION_ID_GENERATE
                 )
@@ -109,40 +134,43 @@ class AudioStreamManager(
                 _isPlaying.value = true
             }
         } catch (e: Exception) {
-            Timber.e(e, "Error starting audio playback")
+            Timber.e(e, "Error initializing audio track")
         }
     }
 
-    /**
-     * Play incoming audio frame (PCM 16-bit)
-     */
-    private fun playAudioFrame(data: ByteArray) {
+    private fun writeToAudioTrack(data: ByteArray) {
         val track = audioTrack ?: return
         try {
             if (track.state == AudioTrack.STATE_INITIALIZED && _isPlaying.value) {
+                // Now safe to use blocking write because we are in a dedicated background job
                 track.write(data, 0, data.size, AudioTrack.WRITE_BLOCKING)
             }
         } catch (e: Exception) {
-            Timber.e(e, "Error playing audio frame")
+            Timber.e(e, "Error writing to audio track")
         }
     }
 
-    /**
-     * Stop audio playback
-     */
-    private fun stopAudioPlayback() {
+    private fun pauseAudioTrack() {
+        _isPlaying.value = false
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+        } catch (e: Exception) {
+            Timber.e(e, "Error pausing audio track")
+        }
+    }
+
+    private fun releaseAudioTrack() {
         _isPlaying.value = false
         val track = audioTrack
         audioTrack = null
         try {
             if (track != null) {
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.stop()
-                }
+                track.stop()
                 track.release()
             }
         } catch (e: Exception) {
-            Timber.e(e, "Error stopping audio playback")
+            Timber.e(e, "Error releasing audio track")
         }
     }
 
@@ -150,10 +178,13 @@ class AudioStreamManager(
      * Disconnect from audio feed
      */
     fun disconnect() {
-        stopAudioPlayback()
         webSocket?.close(1000, "Client closing")
         webSocket = null
         _isConnected.value = false
+        
+        releaseAudioTrack()
+        playbackJob?.cancel()
+        playbackJob = null
     }
 
     /**
