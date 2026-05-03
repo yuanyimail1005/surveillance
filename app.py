@@ -1624,6 +1624,109 @@ audio_broadcaster = FrameBroadcaster('audio', _audio_chunks_gen)
 video_broadcaster.set_proc(camera_proc)
 audio_broadcaster.set_proc(audio_proc)
 
+WS_METRICS_LOG_EVERY_SECONDS = 60
+ws_metrics_lock = threading.Lock()
+ws_metrics = {
+    'started_at': time.time(),
+    'video': {
+        'active': 0,
+        'total_connected': 0,
+        'total_disconnected': 0,
+        'total_errors': 0,
+        'last_connected_at': None,
+        'last_disconnected_at': None,
+        'last_error_at': None,
+        'last_error': None,
+    },
+    'audio': {
+        'active': 0,
+        'total_connected': 0,
+        'total_disconnected': 0,
+        'total_errors': 0,
+        'last_connected_at': None,
+        'last_disconnected_at': None,
+        'last_error_at': None,
+        'last_error': None,
+    },
+    'talk': {
+        'active': 0,
+        'total_connected': 0,
+        'total_disconnected': 0,
+        'total_errors': 0,
+        'last_connected_at': None,
+        'last_disconnected_at': None,
+        'last_error_at': None,
+        'last_error': None,
+    },
+}
+
+
+def _ws_mark_connected(endpoint):
+    now = time.time()
+    with ws_metrics_lock:
+        endpoint_stats = ws_metrics[endpoint]
+        endpoint_stats['active'] += 1
+        endpoint_stats['total_connected'] += 1
+        endpoint_stats['last_connected_at'] = now
+        return endpoint_stats['active']
+
+
+def _ws_mark_disconnected(endpoint):
+    now = time.time()
+    with ws_metrics_lock:
+        endpoint_stats = ws_metrics[endpoint]
+        endpoint_stats['active'] = max(0, endpoint_stats['active'] - 1)
+        endpoint_stats['total_disconnected'] += 1
+        endpoint_stats['last_disconnected_at'] = now
+        return endpoint_stats['active']
+
+
+def _ws_mark_error(endpoint, error):
+    now = time.time()
+    with ws_metrics_lock:
+        endpoint_stats = ws_metrics[endpoint]
+        endpoint_stats['total_errors'] += 1
+        endpoint_stats['last_error_at'] = now
+        endpoint_stats['last_error'] = str(error)[:200]
+
+
+def _ws_metrics_snapshot():
+    with ws_metrics_lock:
+        snapshot = {'started_at': ws_metrics['started_at']}
+        for endpoint in ('video', 'audio', 'talk'):
+            snapshot[endpoint] = dict(ws_metrics[endpoint])
+
+    snapshot['total_active'] = (
+        snapshot['video']['active']
+        + snapshot['audio']['active']
+        + snapshot['talk']['active']
+    )
+    return snapshot
+
+
+def _ws_metrics_reporter():
+    while True:
+        time.sleep(WS_METRICS_LOG_EVERY_SECONDS)
+        snapshot = _ws_metrics_snapshot()
+        print(
+            '📊 WS metrics '
+            f"active(v/a/t)={snapshot['video']['active']}/{snapshot['audio']['active']}/{snapshot['talk']['active']} "
+            f"connected(v/a/t)={snapshot['video']['total_connected']}/{snapshot['audio']['total_connected']}/{snapshot['talk']['total_connected']} "
+            f"disconnected(v/a/t)={snapshot['video']['total_disconnected']}/{snapshot['audio']['total_disconnected']}/{snapshot['talk']['total_disconnected']} "
+            f"errors(v/a/t)={snapshot['video']['total_errors']}/{snapshot['audio']['total_errors']}/{snapshot['talk']['total_errors']}"
+        )
+
+
+threading.Thread(target=_ws_metrics_reporter, daemon=True, name='ws-metrics-reporter').start()
+
+
+def _safe_ws_close(ws, name):
+    """Close socket quietly during cleanup; disconnect is often already in progress."""
+    try:
+        ws.close()
+    except Exception as e:
+        print(f'{name} close ignored: {e}')
+
 @app.route('/')
 def index():
     selected_camera_device = active_camera_device or camera_device_preference or CAMERA_DEVICE
@@ -1651,7 +1754,8 @@ def video_feed_socket(ws):
         print('📹 Video socket: camera not available')
         return
 
-    print('📹 Video socket connected')
+    active_count = _ws_mark_connected('video')
+    print(f'📹 Video socket connected (active={active_count})')
     token, q = video_broadcaster.subscribe()
     last_sent_face_idx = -1
     try:
@@ -1671,10 +1775,13 @@ def video_feed_socket(ws):
                 last_sent_face_idx = payload['result'].get('frame_index', last_sent_face_idx)
                 ws.send(json.dumps({'type': 'face_data', **payload}))
     except Exception as e:
+        _ws_mark_error('video', e)
         print(f'📹 Video socket closed: {e}')
     finally:
         video_broadcaster.unsubscribe(token)
-        print('📹 Video socket disconnected')
+        _safe_ws_close(ws, '📹 Video socket')
+        active_count = _ws_mark_disconnected('video')
+        print(f'📹 Video socket disconnected (active={active_count})')
 
 
 @sock.route('/audio_feed')
@@ -1684,7 +1791,8 @@ def audio_feed_socket(ws):
         print('🎤 Audio socket: audio process not available after restart attempt')
         return
 
-    print('🎤 Audio socket connected')
+    active_count = _ws_mark_connected('audio')
+    print(f'🎤 Audio socket connected (active={active_count})')
     token, q = audio_broadcaster.subscribe()
     chunk_count = 0
     try:
@@ -1702,10 +1810,13 @@ def audio_feed_socket(ws):
                 print(f'🎤 Audio socket: sent chunk {chunk_count} ({len(chunk)} bytes)')
             ws.send(chunk)
     except Exception as e:
+        _ws_mark_error('audio', e)
         print(f'🎤 Audio socket closed: {e}')
     finally:
         audio_broadcaster.unsubscribe(token)
-        print('🎤 Audio socket disconnected')
+        _safe_ws_close(ws, '🎤 Audio socket')
+        active_count = _ws_mark_disconnected('audio')
+        print(f'🎤 Audio socket disconnected (active={active_count})')
 
 def convert_mono_to_stereo(mono_data):
     """Convert mono audio to stereo and apply configurable playback gain."""
@@ -1735,7 +1846,8 @@ def convert_mono_to_stereo(mono_data):
 @sock.route('/ws/talk')
 def talk_audio_socket(ws):
     """Receive mono PCM from the browser over WebSocket and play it immediately."""
-    print('🎙 WebSocket talkback connected')
+    active_count = _ws_mark_connected('talk')
+    print(f'🎙 WebSocket talkback connected (active={active_count})')
     message_count = 0
     received_bytes = 0
     try:
@@ -1762,9 +1874,12 @@ def talk_audio_socket(ws):
                 print('⚠ WebSocket talkback write failed')
                 break
     except Exception as e:
+        _ws_mark_error('talk', e)
         print(f'⚠ WebSocket talkback closed: {e}')
     finally:
-        print('🎙 WebSocket talkback disconnected')
+        _safe_ws_close(ws, '🎙 Talkback socket')
+        active_count = _ws_mark_disconnected('talk')
+        print(f'🎙 WebSocket talkback disconnected (active={active_count})')
 
 
 @app.route('/speaker_volume', methods=['GET'])
@@ -1935,6 +2050,7 @@ def set_camera_settings():
 def status():
     speaker_volume, speaker_control = _get_speaker_volume_percent()
     selected_camera_device = active_camera_device or camera_device_preference or CAMERA_DEVICE
+    ws_snapshot = _ws_metrics_snapshot()
     return jsonify({
         'camera': camera_proc is not None and camera_proc.poll() is None,
         'audio': audio_proc is not None and audio_proc.poll() is None,
@@ -1948,7 +2064,8 @@ def status():
         'audio_player_nice': AUDIO_PLAYER_NICE,
         'face_recognition_enabled': FACE_RECOGNITION_ENABLED,
         'speaker_volume': speaker_volume,
-        'speaker_control': speaker_control
+        'speaker_control': speaker_control,
+        'ws_connections': ws_snapshot
     })
 
 @app.route('/face_status', methods=['GET'])
