@@ -10,6 +10,10 @@
     <!-- Video Fragment -->
     <string name="video_loading">Loading video stream…</string>
     <string name="video_error">Video stream error</string>
+    <string name="video_connected">Video Connected</string>
+    <string name="video_disconnected">Video Disconnected</string>
+    <string name="audio_connected">Audio Connected</string>
+    <string name="audio_disconnected">Audio Disconnected</string>
     <string name="audio_disabled">Audio disabled</string>
     <string name="talkback_button">Talkback</string>
     <string name="talkback_recording">Recording…</string>

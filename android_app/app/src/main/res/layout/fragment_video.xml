@@ -37,28 +37,61 @@
         android:orientation="vertical"
         android:padding="@dimen/spacing_medium">
 
-        <!-- Audio Status -->
+        <!-- Stream Status -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="@dimen/spacing_medium"
-            android:orientation="horizontal">
+            android:orientation="vertical">
 
-            <ImageView
-                android:id="@+id/audio_status_icon"
-                android:layout_width="@dimen/icon_normal"
-                android:layout_height="@dimen/icon_normal"
-                android:contentDescription="@string/audio_status"
-                android:src="@android:drawable/ic_dialog_info" />
-
-            <TextView
-                android:id="@+id/audio_status_text"
-                android:layout_width="0dp"
+            <!-- Video Status -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_margin="@dimen/spacing_small"
-                android:layout_weight="1"
-                android:text="@string/audio_disabled"
-                android:textColor="@color/text_primary" />
+                android:layout_marginBottom="4dp"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:id="@+id/video_status_icon"
+                    android:layout_width="@dimen/icon_small"
+                    android:layout_height="@dimen/icon_small"
+                    android:contentDescription="@string/video_connected"
+                    android:src="@android:drawable/ic_dialog_info" />
+
+                <TextView
+                    android:id="@+id/video_status_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/spacing_small"
+                    android:text="@string/video_disconnected"
+                    android:textColor="@color/text_primary"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
+
+            <!-- Audio Status -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:id="@+id/audio_status_icon"
+                    android:layout_width="@dimen/icon_small"
+                    android:layout_height="@dimen/icon_small"
+                    android:contentDescription="@string/audio_status"
+                    android:src="@android:drawable/ic_dialog_info" />
+
+                <TextView
+                    android:id="@+id/audio_status_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/spacing_small"
+                    android:text="@string/audio_disabled"
+                    android:textColor="@color/text_primary"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
 
         </LinearLayout>
 

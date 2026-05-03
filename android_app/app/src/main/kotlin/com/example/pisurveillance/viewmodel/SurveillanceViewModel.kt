@@ -81,6 +81,9 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private val _videoFrames = MutableLiveData<VideoFrame?>(null)
     val videoFrames: LiveData<VideoFrame?> = _videoFrames
 
+    private val _videoConnected = MutableLiveData(false)
+    val videoConnected: LiveData<Boolean> = _videoConnected
+
     private val _audioConnected = MutableLiveData(false)
     val audioConnected: LiveData<Boolean> = _audioConnected
 
@@ -137,6 +140,9 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                         saveFrameToRecording(frame.rawData)
                     }
                 }
+            }
+            launch {
+                videoStreamManager?.isConnected?.collect { _videoConnected.postValue(it) }
             }
             launch {
                 videoStreamManager?.faceData?.collect { data ->

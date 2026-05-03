@@ -79,6 +79,15 @@ class MainActivity : AppCompatActivity() {
         return navController.navigateUp(appBarConfiguration) || super.onSupportNavigateUp()
     }
 
+    override fun onStop() {
+        super.onStop()
+        // Disconnect when app is moved to background (Home button)
+        // but not during screen rotation
+        if (!isChangingConfigurations) {
+            viewModel.disconnect()
+        }
+    }
+
     fun getViewModel(): SurveillanceViewModel = viewModel
 
     override fun onDestroy() {

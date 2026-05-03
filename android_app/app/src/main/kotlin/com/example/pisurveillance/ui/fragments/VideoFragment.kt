@@ -53,7 +53,7 @@ class VideoFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         setupVideoDisplay()
-        setupAudioStatusDisplay()
+        setupStatusDisplays()
         setupTalkbackButton()
         setupCaptureButtons()
         observeStreams()
@@ -76,20 +76,34 @@ class VideoFragment : Fragment() {
     }
 
     /**
-     * Setup audio status indicator
+     * Setup status indicators (Video and Audio)
      */
-    private fun setupAudioStatusDisplay() {
+    private fun setupStatusDisplays() {
+        viewModel?.videoConnected?.observe(viewLifecycleOwner) { connected ->
+            binding.videoStatusText.text = if (connected) {
+                binding.videoStatusIcon.setColorFilter(
+                    ContextCompat.getColor(requireContext(), R.color.success)
+                )
+                getString(R.string.video_connected)
+            } else {
+                binding.videoStatusIcon.setColorFilter(
+                    ContextCompat.getColor(requireContext(), R.color.error)
+                )
+                getString(R.string.video_disconnected)
+            }
+        }
+
         viewModel?.audioConnected?.observe(viewLifecycleOwner) { connected ->
             binding.audioStatusText.text = if (connected) {
                 binding.audioStatusIcon.setColorFilter(
                     ContextCompat.getColor(requireContext(), R.color.success)
                 )
-                "Audio Connected"
+                getString(R.string.audio_connected)
             } else {
                 binding.audioStatusIcon.setColorFilter(
                     ContextCompat.getColor(requireContext(), R.color.error)
                 )
-                "Audio Disconnected"
+                getString(R.string.audio_disconnected)
             }
         }
     }
