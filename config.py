@@ -58,7 +58,9 @@ SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', 'cert.pem')
 SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', 'key.pem')
 
 FACE_RECOGNITION_ENABLED = os.environ.get('FACE_RECOGNITION_ENABLED', 'false').lower() == 'true'
-FACE_RECOGNITION_KNOWN_FACES_DIR = os.environ.get('FACE_RECOGNITION_KNOWN_FACES_DIR', '/home/eric/known_faces')
+FACE_RECOGNITION_KNOWN_FACES_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get('FACE_RECOGNITION_KNOWN_FACES_DIR', '/home/eric/known_faces')
+))
 _detect_n_env = os.environ.get('FACE_RECOGNITION_DETECT_EVERY_N_FRAMES')
 FACE_RECOGNITION_DETECT_EVERY_N_FRAMES = max(1, int(_detect_n_env)) if _detect_n_env else None  # None = auto (fps // 2)
 FACE_RECOGNITION_MATCH_THRESHOLD = float(os.environ.get('FACE_RECOGNITION_MATCH_THRESHOLD', '0.45'))

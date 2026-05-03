@@ -993,12 +993,12 @@ class FaceRecognitionService:
         self._status_message = 'ready (dlib)'
         return True
 
-    @staticmethod
-    def _image_file_key(path):
-        """Return a (path, mtime, size) tuple used as a cache key."""
+    def _image_file_key(self, path):
+        """Return a (relative_path, mtime, size) tuple used as a cache key."""
         try:
+            rel_path = os.path.relpath(path, self._known_faces_dir).replace('\\', '/')
             st = os.stat(path)
-            return (path, st.st_mtime, st.st_size)
+            return (rel_path, st.st_mtime, st.st_size)
         except OSError:
             return (path, 0, 0)
 

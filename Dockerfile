@@ -24,6 +24,8 @@ RUN set -eux; \
         python3-dev \
         build-essential \
         cmake \
+        libopenblas-dev \
+        liblapack-dev \
         ffmpeg \
         pulseaudio \
         pulseaudio-utils \
