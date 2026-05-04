@@ -1,0 +1,49 @@
+services:
+  surveillance:
+    container_name: surveillance
+    image: yuanyimail1005/surveillance:latest
+    # The published image is arm64 (Raspberry Pi base).
+    # Keep this set unless you publish an amd64 variant.
+    platform: linux/arm64
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5000:5000"
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: ${SERVER_PORT:-5000}
+
+      # TLS certs inside container
+      SSL_CERT_PATH: /certs/cert.pem
+      SSL_KEY_PATH: /certs/key.pem
+
+      # PulseAudio bridge from Windows host
+      PULSE_SERVER: ${PULSE_SERVER:-tcp:host.docker.internal:4713}
+      PULSE_SINK_NAME: ${PULSE_SINK_NAME:-@DEFAULT_SINK@}
+      PULSE_CAPTURE_SOURCE_NAME: ${PULSE_CAPTURE_SOURCE_NAME:-@DEFAULT_SOURCE@}
+      PULSE_ECHO_CANCEL_ENABLED: ${PULSE_ECHO_CANCEL_ENABLED:-false}
+
+      AUDIO_PLAYER_NICE: ${AUDIO_PLAYER_NICE:-0}
+      TALKBACK_PLAYBACK_GAIN: ${TALKBACK_PLAYBACK_GAIN:-5.0}
+
+      FACE_RECOGNITION_KNOWN_FACES_DIR: /known_faces
+      FACE_RECOGNITION_ENABLED: ${FACE_RECOGNITION_ENABLED:-true}
+      FACE_RECOGNITION_DETECT_EVERY_N_FRAMES: ${FACE_RECOGNITION_DETECT_EVERY_N_FRAMES:-}
+      FACE_RECOGNITION_MATCH_THRESHOLD: ${FACE_RECOGNITION_MATCH_THRESHOLD:-0.45}
+      FACE_RECOGNITION_MAX_FACES: ${FACE_RECOGNITION_MAX_FACES:-3}
+      FACE_RECOGNITION_BACKEND: ${FACE_RECOGNITION_BACKEND:-auto}
+
+      # Camera defaults for WSL2 USB passthrough
+      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
+      CAMERA_WIDTH: ${CAMERA_WIDTH:-1920}
+      CAMERA_HEIGHT: ${CAMERA_HEIGHT:-1080}
+      CAMERA_FPS: ${CAMERA_FPS:-25}
+
+    volumes:
+      - ${CERTS_DIR:-./certs}:/certs:ro
+      - ${FACE_RECOGNITION_KNOWN_FACES_DIR:-./known_faces}:/known_faces:ro
+
+    # Uncomment if webcam is attached into WSL2 with usbipd and /dev/video0 exists.
+    devices:
+      - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
