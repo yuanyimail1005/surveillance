@@ -7,6 +7,25 @@ The recommended way to run the app is with Docker Compose. The image is built on
 `dtcooper/raspberrypi-os:bookworm` (arm64 Raspberry Pi OS Bookworm), which includes `rpicam-apps`
 for CSI camera support alongside V4L2/USB cameras.
 
+### Docker Hub
+
+Published image:
+
+- `yuanyimail1005/surveillance:latest`
+
+Pull the latest image from Docker Hub:
+
+```bash
+sudo docker pull yuanyimail1005/surveillance:latest
+```
+
+If you want Docker Compose to use the pulled image without rebuilding, tag it as the local
+compose image name:
+
+```bash
+sudo docker tag yuanyimail1005/surveillance:latest surveillance:latest
+```
+
 ### Prerequisites
 
 - Docker and Docker Compose installed on the Raspberry Pi host.

@@ -54,8 +54,8 @@ SPEAKER_VOLUME_CONTROLS = ('Speaker', 'PCM', 'Master', 'Headphone')
 
 SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.environ.get('SERVER_PORT', '5000'))
-SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', 'cert.pem')
-SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', 'key.pem')
+SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', '/home/eric/certs/cert.pem')
+SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', '/home/eric/certs/key.pem')
 
 FACE_RECOGNITION_ENABLED = os.environ.get('FACE_RECOGNITION_ENABLED', 'false').lower() == 'true'
 FACE_RECOGNITION_KNOWN_FACES_DIR = os.path.abspath(os.path.expanduser(

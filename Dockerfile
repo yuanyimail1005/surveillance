@@ -65,4 +65,4 @@ COPY . .
 
 EXPOSE 5000
 
-CMD ["sh", "-c", "exec gunicorn --bind ${SERVER_HOST:-0.0.0.0}:${SERVER_PORT:-5000} --workers 1 --threads 100 --timeout 0 --access-logfile - --error-logfile - --certfile ${SSL_CERT_PATH:-/app/cert.pem} --keyfile ${SSL_KEY_PATH:-/app/key.pem} app:app"]
+CMD ["sh", "-c", "exec gunicorn --bind ${SERVER_HOST:-0.0.0.0}:${SERVER_PORT:-5000} --workers 1 --threads 100 --timeout 0 --access-logfile - --error-logfile - --certfile ${SSL_CERT_PATH:-/certs/cert.pem} --keyfile ${SSL_KEY_PATH:-/certs/key.pem} app:app"]
