@@ -147,6 +147,11 @@ cd android_app
 
 See [android_app/README.md](android_app/README.md) for full documentation.
 
+### UI
+<img width="1074" height="2237" alt="Screenshot_20260503-100357" src="https://github.com/user-attachments/assets/197284e2-d3c2-49e3-aa8e-21c10e52344c" />
+<img width="1074" height="2200" alt="Screenshot_20260503-100424" src="https://github.com/user-attachments/assets/975108c9-cefb-42de-a419-e8ec90df3b39" />
+
+
 ## Example snapshots
 <img width="1920" height="1080" alt="snapshot_1778040701174" src="https://github.com/user-attachments/assets/54483c76-505b-478c-8172-0230e0d452d2" />
 <img width="1920" height="1080" alt="snapshot_1778040746517" src="https://github.com/user-attachments/assets/c8fd97c8-cae7-4be1-b4c9-146039d83c09" />
