@@ -146,3 +146,8 @@ cd android_app
 4. Save and connect
 
 See [android_app/README.md](android_app/README.md) for full documentation.
+
+## Example snapshots
+<img width="1920" height="1080" alt="snapshot_1778040701174" src="https://github.com/user-attachments/assets/54483c76-505b-478c-8172-0230e0d452d2" />
+<img width="1920" height="1080" alt="snapshot_1778040746517" src="https://github.com/user-attachments/assets/c8fd97c8-cae7-4be1-b4c9-146039d83c09" />
+
