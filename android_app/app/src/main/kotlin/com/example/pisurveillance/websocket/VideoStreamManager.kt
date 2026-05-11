@@ -37,6 +37,7 @@ class VideoStreamManager(
     private var processingJob: Job? = null
     
     private var nextFrameSeq: Long = 0
+    private var lastHandledSeq: Long = 0
 
     private val _frames = MutableStateFlow<VideoFrame?>(null)
     val frames: StateFlow<VideoFrame?> = _frames
@@ -107,6 +108,17 @@ class VideoStreamManager(
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                     val seq = if (nextFrameSeq > 0) nextFrameSeq else 0
+                    
+                    // Drop frames that arrive out of order or are older than what we've handled
+                    if (seq > 0 && seq <= lastHandledSeq) {
+                        nextFrameSeq = 0
+                        return
+                    }
+                    
+                    if (seq > 0) {
+                        lastHandledSeq = seq
+                    }
+
                     frameChannel.trySend(Pair(bytes.toByteArray(), seq))
                     nextFrameSeq = 0 
                 }

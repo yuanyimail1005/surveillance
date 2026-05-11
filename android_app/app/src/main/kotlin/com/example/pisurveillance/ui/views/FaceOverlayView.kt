@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
 import com.example.pisurveillance.models.FaceDetectionResult
+import kotlin.math.min
 
 /**
  * Custom view for drawing face detection boxes and labels over the video feed
@@ -106,29 +107,59 @@ class FaceOverlayView @JvmOverloads constructor(
         super.onDraw(canvas)
         
         val result = getCurrentFaceResult() ?: return
-        drawDetections(canvas, width, height, result)
+        drawDetections(canvas, width, height, result, isSnapshot = false)
     }
 
     /**
      * Shared logic to draw detections onto any canvas (View or Snapshot)
      */
-    fun drawDetections(canvas: Canvas, targetWidth: Int, targetHeight: Int, result: FaceDetectionResult) {
+    fun drawDetections(
+        canvas: Canvas, 
+        targetWidth: Int, 
+        targetHeight: Int, 
+        result: FaceDetectionResult,
+        isSnapshot: Boolean = true
+    ) {
         if (result.faces.isEmpty()) return
 
-        val scaleX = targetWidth.toFloat() / result.imageWidth
-        val scaleY = targetHeight.toFloat() / result.imageHeight
+        var scaleX: Float
+        var scaleY: Float
+        var offsetX = 0f
+        var offsetY = 0f
+
+        if (isSnapshot) {
+            // On snapshot, coordinates are 1:1 with the bitmap
+            scaleX = targetWidth.toFloat() / result.imageWidth
+            scaleY = targetHeight.toFloat() / result.imageHeight
+        } else {
+            // On UI Overlay (View), we must account for 'fitCenter' scaling of the ImageView
+            val viewAspect = targetWidth.toFloat() / targetHeight
+            val imageAspect = result.imageWidth.toFloat() / result.imageHeight
+
+            if (imageAspect > viewAspect) {
+                // Image is wider than view (Pillarboxing)
+                scaleX = targetWidth.toFloat() / result.imageWidth
+                scaleY = scaleX
+                offsetY = (targetHeight - (result.imageHeight * scaleY)) / 2f
+            } else {
+                // Image is taller than view (Letterboxing)
+                scaleY = targetHeight.toFloat() / result.imageHeight
+                scaleX = scaleY
+                offsetX = (targetWidth - (result.imageWidth * scaleX)) / 2f
+            }
+        }
         
         // Adjust text size based on scale to keep it readable on high-res snapshots
         val originalTextSize = labelPaint.textSize
         if (targetWidth > width) {
-            labelPaint.textSize = originalTextSize * (targetWidth.toFloat() / width)
+            labelPaint.textSize = originalTextSize * (targetWidth.toFloat() / width.coerceAtLeast(1))
         }
 
         for (face in result.faces) {
-            val left = face.left * scaleX
-            val top = face.top * scaleY
-            val right = face.right * scaleX
-            val bottom = face.bottom * scaleY
+            val left = offsetX + (face.left * scaleX)
+            val top = offsetY + (face.top * scaleY)
+            val right = offsetX + (face.right * scaleX)
+            val bottom = offsetY + (face.bottom * scaleY)
 
             val rect = RectF(left, top, right, bottom)
             

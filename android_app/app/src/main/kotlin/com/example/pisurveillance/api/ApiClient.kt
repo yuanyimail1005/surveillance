@@ -50,7 +50,8 @@ object ApiClient {
 
             // Add logging interceptor
             val loggingInterceptor = HttpLoggingInterceptor()
-            loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY)
+            // IMPORTANT: Don't use Level.BODY for video streaming as it adds massive latency
+            loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.HEADERS)
             builder.addInterceptor(loggingInterceptor)
 
             // Configure SSL/TLS

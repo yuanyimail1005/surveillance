@@ -47,39 +47,39 @@ class SettingsFragment : Fragment() {
      * Setup Face AI settings controls
      */
     private fun setupFaceAiSettings() {
-        // Backend options with descriptive names matching templates/index.html
-        val backendMap = mapOf(
-            "auto" to "Auto (opencv → dlib)",
-            "opencv" to "OpenCV (YuNet + SFace)",
-            "dlib" to "dlib (HOG + ResNet)"
-        )
-        val displayNames = backendMap.values.toList()
-        
-        // Use a non-filtering adapter to ensure all 3 options are ALWAYS visible
-        val adapter = object : ArrayAdapter<String>(requireContext(), R.layout.list_item_dropdown, displayNames) {
-            override fun getFilter() = object : android.widget.Filter() {
-                override fun performFiltering(constraint: CharSequence?) = FilterResults().apply {
-                    values = displayNames
-                    count = displayNames.size
-                }
-                override fun publishResults(constraint: CharSequence?, results: FilterResults?) {
-                    notifyDataSetChanged()
-                }
-            }
-        }
-        binding.faceBackendSpinner.setAdapter(adapter)
-
         viewModel?.faceStatus?.observe(viewLifecycleOwner) { status ->
             if (status != null) {
-                // IMPORTANT: Disable listeners before updating UI to avoid infinite loops
-                binding.faceRecognitionSwitch.setOnCheckedChangeListener(null)
-                binding.faceBackendSpinner.setOnItemClickListener(null)
+                // Populate backends from server's supported list
+                val supportedBackends = status.supportedBackends ?: emptyList()
+                if (supportedBackends.isNotEmpty()) {
+                    val displayNames = supportedBackends.map { it.label }
+                    val currentAdapter = binding.faceBackendSpinner.adapter as? ArrayAdapter<String>
+                    
+                    if (currentAdapter == null || currentAdapter.count != displayNames.size) {
+                        val adapter = object : ArrayAdapter<String>(requireContext(), R.layout.list_item_dropdown, displayNames) {
+                            override fun getFilter() = object : android.widget.Filter() {
+                                override fun performFiltering(constraint: CharSequence?) = FilterResults().apply {
+                                    values = displayNames
+                                    count = displayNames.size
+                                }
+                                override fun publishResults(constraint: CharSequence?, results: FilterResults?) {
+                                    notifyDataSetChanged()
+                                }
+                            }
+                        }
+                        binding.faceBackendSpinner.setAdapter(adapter)
+                    }
+                }
 
-                binding.faceRecognitionSwitch.isChecked = status.enabled
+                // Update switch state safely
+                if (binding.faceRecognitionSwitch.isChecked != status.enabled) {
+                    binding.faceRecognitionSwitch.isChecked = status.enabled
+                }
                 
-                // Update dropdown text using the descriptive name
-                val displayName = backendMap[status.backend] ?: backendMap["auto"]
-                // Only update text if it's different and user isn't currently interacting
+                val currentBackend = status.requestedBackend ?: status.backend
+                val displayName = supportedBackends.find { it.id == currentBackend }?.label 
+                    ?: currentBackend ?: ""
+                
                 if (!binding.faceBackendSpinner.isFocused && binding.faceBackendSpinner.text.toString() != displayName) {
                     binding.faceBackendSpinner.setText(displayName, false)
                 }
@@ -90,44 +90,40 @@ class SettingsFragment : Fragment() {
                     "Disabled"
                 }
                 binding.faceSettingsStatus.text = "Status: $statusText"
-
-                // Re-enable listeners after UI update
-                setupFaceListeners(backendMap, adapter)
             }
         }
 
-        setupFaceListeners(backendMap, adapter)
-        
-        binding.faceBackendSpinner.setOnClickListener {
-            binding.faceBackendSpinner.showDropDown()
-        }
-    }
-
-    private fun setupFaceListeners(backendMap: Map<String, String>, adapter: ArrayAdapter<String>) {
-        binding.faceRecognitionSwitch.setOnCheckedChangeListener { _, isChecked ->
-            val currentStatus = viewModel?.faceStatus?.value
+        binding.faceRecognitionSwitch.setOnClickListener {
+            val isEnabled = binding.faceRecognitionSwitch.isChecked
             val currentDisplayName = binding.faceBackendSpinner.text.toString()
+            val currentStatus = viewModel?.faceStatus?.value
+            val supportedBackends = currentStatus?.supportedBackends ?: emptyList()
             
-            // CRITICAL: Find backend key by display name. 
-            // If the field is empty (rare but possible during UI updates), don't send anything.
-            val backendValue = backendMap.entries.find { it.value == currentDisplayName }?.key
+            val backendValue = supportedBackends.find { it.label == currentDisplayName }?.id 
+                ?: currentStatus?.requestedBackend
+                ?: currentStatus?.backend
+                ?: "auto"
             
-            if (backendValue != null) {
-                if (currentStatus == null || isChecked != currentStatus.enabled || backendValue != currentStatus.backend) {
-                    viewModel?.updateFaceSettings(isChecked, backendValue)
-                }
-            }
+            viewModel?.updateFaceSettings(isEnabled, backendValue)
         }
 
         binding.faceBackendSpinner.setOnItemClickListener { _, _, position, _ ->
-            val selectedDisplayName = adapter.getItem(position)
-            val backendValue = backendMap.entries.find { it.value == selectedDisplayName }?.key ?: "auto"
-            val enabled = binding.faceRecognitionSwitch.isChecked
-            
+            val adapter = binding.faceBackendSpinner.adapter as? ArrayAdapter<String>
+            val selectedDisplayName = adapter?.getItem(position)
             val currentStatus = viewModel?.faceStatus?.value
-            if (currentStatus == null || backendValue != currentStatus.backend) {
-                viewModel?.updateFaceSettings(enabled, backendValue)
-            }
+            val supportedBackends = currentStatus?.supportedBackends ?: emptyList()
+            
+            val backendValue = supportedBackends.find { it.label == selectedDisplayName }?.id 
+                ?: currentStatus?.requestedBackend
+                ?: currentStatus?.backend
+                ?: "auto"
+            
+            val enabled = binding.faceRecognitionSwitch.isChecked
+            viewModel?.updateFaceSettings(enabled, backendValue)
+        }
+
+        binding.faceBackendSpinner.setOnClickListener {
+            binding.faceBackendSpinner.showDropDown()
         }
     }
 

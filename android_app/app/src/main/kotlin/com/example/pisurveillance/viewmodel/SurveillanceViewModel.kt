@@ -15,6 +15,9 @@ import com.example.pisurveillance.websocket.TalkbackManager
 import com.example.pisurveillance.websocket.VideoFrame
 import com.example.pisurveillance.websocket.VideoStreamManager
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.io.FileOutputStream
@@ -77,9 +80,9 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private var audioStreamManager: AudioStreamManager? = null
     private var talkbackManager: TalkbackManager? = null
 
-    // Shared LiveData for UI
-    private val _videoFrames = MutableLiveData<VideoFrame?>(null)
-    val videoFrames: LiveData<VideoFrame?> = _videoFrames
+    // Shared State for UI
+    private val _videoFrames = MutableStateFlow<VideoFrame?>(null)
+    val videoFrames: StateFlow<VideoFrame?> = _videoFrames.asStateFlow()
 
     private val _videoConnected = MutableLiveData(false)
     val videoConnected: LiveData<Boolean> = _videoConnected
@@ -95,6 +98,8 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
 
     private val _faceStatus = MutableLiveData<FaceStatusResponse?>(null)
     val faceStatus: LiveData<FaceStatusResponse?> = _faceStatus
+
+    private var lastManualFaceUpdateAt = 0L
 
     private var initializationJob: Job? = null
     private var observationJob: Job? = null
@@ -134,7 +139,7 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
         observationJob = viewModelScope.launch {
             launch {
                 videoStreamManager?.frames?.collect { frame ->
-                    _videoFrames.postValue(frame)
+                    _videoFrames.value = frame
                     // If recording, save the raw data to the stream
                     if (frame != null && _isRecordingVideo.value == true) {
                         saveFrameToRecording(frame.rawData)
@@ -149,14 +154,18 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                     _faceData.postValue(data)
                     
                     // Update configuration status ONLY if the WebSocket message contains 
-                    // actual configuration data (enabled, available, backend).
-                    // Many WebSocket pushes only contain detection results to save bandwidth.
-                    if (data != null && data.backend != null) {
+                    // actual configuration data AND we aren't currently applying a manual update.
+                    // This prevents "flickering" where a background update reverts a user action.
+                    val now = System.currentTimeMillis()
+                    if (data != null && data.backend != null && (now - lastManualFaceUpdateAt > 5000)) {
                         val currentStatus = _faceStatus.value
                         _faceStatus.postValue(FaceStatusResponse(
                             enabled = data.enabled,
                             available = data.available,
                             backend = data.backend,
+                            requestedBackend = data.requestedBackend,
+                            // Preserve existing supported backends if not provided in push
+                            supportedBackends = data.supportedBackends ?: currentStatus?.supportedBackends,
                             message = data.message ?: currentStatus?.message,
                             knownFacesCount = data.knownFacesCount ?: currentStatus?.knownFacesCount,
                             broadcastFrameSeq = data.broadcastFrameSeq,
@@ -443,7 +452,11 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                 val service = apiService ?: return@launch
                 val response = service.getFaceStatus()
                 if (response.isSuccessful) {
-                    _faceStatus.postValue(response.body())
+                    // Only apply background poll results if we haven't manually updated recently
+                    val now = System.currentTimeMillis()
+                    if (now - lastManualFaceUpdateAt > 5000) {
+                        _faceStatus.postValue(response.body())
+                    }
                 }
             } catch (e: Exception) {
                 Timber.e(e, "Error fetching face status")
@@ -455,13 +468,28 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      * Update face recognition settings
      */
     fun updateFaceSettings(enabled: Boolean, backend: String = "auto") {
+        lastManualFaceUpdateAt = System.currentTimeMillis()
         viewModelScope.launch {
             try {
                 val service = apiService ?: return@launch
                 val request = FaceSettingsRequest(enabled, backend)
                 val response = service.updateFaceSettings(request)
                 if (response.isSuccessful) {
-                    fetchFaceStatus()
+                    val settings = response.body()
+                    if (settings != null) {
+                        val currentStatus = _faceStatus.value
+                        _faceStatus.postValue(FaceStatusResponse(
+                            enabled = settings.enabled,
+                            available = settings.available,
+                            backend = settings.backend,
+                            requestedBackend = settings.requestedBackend,
+                            supportedBackends = settings.supportedBackends ?: currentStatus?.supportedBackends,
+                            message = settings.message,
+                            knownFacesCount = currentStatus?.knownFacesCount,
+                            broadcastFrameSeq = currentStatus?.broadcastFrameSeq,
+                            result = currentStatus?.result
+                        ))
+                    }
                 }
             } catch (e: Exception) {
                 Timber.e(e, "Error updating face settings")

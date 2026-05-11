@@ -16,11 +16,14 @@ import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.example.pisurveillance.MainActivity
 import com.example.pisurveillance.R
 import com.example.pisurveillance.databinding.FragmentVideoBinding
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -64,13 +67,17 @@ class VideoFragment : Fragment() {
      * Setup video display to show incoming frames
      */
     private fun setupVideoDisplay() {
-        viewModel?.videoFrames?.observe(viewLifecycleOwner) { frame ->
-            if (frame != null) {
-                binding.videoDisplay.setImageBitmap(frame.bitmap)
-                binding.faceOverlay.notifyVideoFrameReceived(frame.sequence)
-                binding.loadingSpinner.visibility = View.GONE
-            } else {
-                binding.loadingSpinner.visibility = View.VISIBLE
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel?.videoFrames?.collectLatest { frame ->
+                    if (frame != null) {
+                        binding.videoDisplay.setImageBitmap(frame.bitmap)
+                        binding.faceOverlay.notifyVideoFrameReceived(frame.sequence)
+                        binding.loadingSpinner.visibility = View.GONE
+                    } else {
+                        binding.loadingSpinner.visibility = View.VISIBLE
+                    }
+                }
             }
         }
     }

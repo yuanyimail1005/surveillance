@@ -215,6 +215,10 @@ data class FaceAiData(
     val available: Boolean,
     @SerializedName("backend")
     val backend: String?,
+    @SerializedName("requested_backend")
+    val requestedBackend: String?,
+    @SerializedName("supported_backends")
+    val supportedBackends: List<FaceBackend>?,
     @SerializedName("message")
     val message: String?,
     @SerializedName("known_faces_count")
@@ -223,6 +227,16 @@ data class FaceAiData(
     val broadcastFrameSeq: Long?,
     @SerializedName("result")
     val result: FaceDetectionResult?
+)
+
+/**
+ * Face recognition backend option
+ */
+data class FaceBackend(
+    @SerializedName("id")
+    val id: String,
+    @SerializedName("label")
+    val label: String
 )
 
 /**
@@ -235,6 +249,10 @@ data class FaceStatusResponse(
     val available: Boolean,
     @SerializedName("backend")
     val backend: String?,
+    @SerializedName("requested_backend")
+    val requestedBackend: String?,
+    @SerializedName("supported_backends")
+    val supportedBackends: List<FaceBackend>?,
     @SerializedName("message")
     val message: String?,
     @SerializedName("known_faces_count")
@@ -257,10 +275,19 @@ data class FaceSettingsRequest(
  * Response from face settings update
  */
 data class FaceSettingsResponse(
+    @SerializedName("status")
     val status: String,
+    @SerializedName("enabled")
     val enabled: Boolean,
+    @SerializedName("backend")
     val backend: String?,
+    @SerializedName("requested_backend")
+    val requestedBackend: String?,
+    @SerializedName("supported_backends")
+    val supportedBackends: List<FaceBackend>?,
+    @SerializedName("available")
     val available: Boolean,
+    @SerializedName("message")
     val message: String?
 )
 

@@ -58,9 +58,9 @@ interface SurveillanceService {
     ): Response<AudioDevicesResponse>
 
     /**
-     * Get face recognition status
+     * Get face recognition status and settings
      */
-    @GET("/face_status")
+    @GET("/face_settings")
     suspend fun getFaceStatus(): Response<FaceStatusResponse>
 
     /**
