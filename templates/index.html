@@ -679,11 +679,7 @@
                     </div>
                     <div>
                         <label for="face-backend-select" style="display:block; font-size:0.9em; font-weight:600; color:#2f3640; margin-bottom:6px;">Backend</label>
-                        <select id="face-backend-select" class="rotation-select">
-                            <option value="auto">Auto (opencv → dlib)</option>
-                            <option value="opencv">OpenCV (YuNet + SFace)</option>
-                            <option value="dlib">dlib (HOG + ResNet)</option>
-                        </select>
+                        <select id="face-backend-select" class="rotation-select"></select>
                     </div>
                     <p class="volume-text" id="face-settings-status">Loading...</p>
                 </div>
@@ -2766,6 +2762,38 @@
             }
         }
 
+        function renderFaceBackendOptions(supportedBackends, selectedBackend) {
+            const backendSelect = document.getElementById('face-backend-select');
+            if (!backendSelect || !Array.isArray(supportedBackends)) {
+                return;
+            }
+
+            const normalizedOptions = supportedBackends
+                .filter((item) => item && item.id)
+                .map((item) => ({
+                    id: String(item.id),
+                    label: String(item.label || item.id)
+                }));
+
+            backendSelect.innerHTML = '';
+            normalizedOptions.forEach((item) => {
+                const option = document.createElement('option');
+                option.value = item.id;
+                option.textContent = item.label;
+                backendSelect.appendChild(option);
+            });
+
+            backendSelect.disabled = normalizedOptions.length === 0;
+
+            const preferredBackend = String(selectedBackend || '').toLowerCase();
+            const hasPreferred = normalizedOptions.some((item) => item.id === preferredBackend);
+            if (hasPreferred) {
+                backendSelect.value = preferredBackend;
+            } else if (normalizedOptions.length > 0) {
+                backendSelect.value = normalizedOptions[0].id;
+            }
+        }
+
         function updateFaceSettingsUI(data) {
             const toggle = document.getElementById('face-recognition-toggle');
             const backendSelect = document.getElementById('face-backend-select');
@@ -2774,11 +2802,10 @@
             if (toggle && data.enabled !== undefined) {
                 toggle.checked = Boolean(data.enabled);
             }
-            if (backendSelect && data.backend && data.backend !== 'none') {
-                const validOptions = ['auto', 'opencv', 'dlib'];
-                if (validOptions.includes(data.backend)) {
-                    backendSelect.value = data.backend;
-                }
+            if (Array.isArray(data.supported_backends)) {
+                renderFaceBackendOptions(data.supported_backends, data.requested_backend || data.backend);
+            } else if (backendSelect && data.requested_backend) {
+                backendSelect.value = data.requested_backend;
             }
             if (statusEl) {
                 const ready = data.available ? `Active (${data.backend})` : `Unavailable: ${data.message || 'not ready'}`;
@@ -2805,7 +2832,7 @@
             }
 
             // Sync initial state from server
-            fetch('/face_status')
+            fetch('/face_settings')
                 .then(r => r.json())
                 .then(data => {
                     updateFaceSettingsUI(data);

@@ -907,6 +907,7 @@ class FaceRecognitionService:
         backend=None,
     ):
         self._enabled_requested = bool(enabled)
+        self._requested_backend = backend if backend is not None else FACE_RECOGNITION_BACKEND
         self._known_faces_dir = known_faces_dir
         self._detect_every_n_frames = max(1, int(detect_every_n_frames))
         self._match_threshold = float(match_threshold)
@@ -936,9 +937,10 @@ class FaceRecognitionService:
             self._status_message = 'numpy/cv2 dependencies unavailable'
             return
 
-        backend = backend if backend is not None else FACE_RECOGNITION_BACKEND
+        backend = self._requested_backend
         if backend not in ('auto', 'opencv', 'dlib'):
             backend = 'auto'
+        self._requested_backend = backend
 
         if backend in ('auto', 'opencv') and self._try_init_opencv_backend():
             return
@@ -1288,6 +1290,7 @@ class FaceRecognitionService:
             'enabled': self._enabled_requested,
             'available': self._available,
             'backend': self._backend,
+            'requested_backend': self._requested_backend,
             'message': self._status_message,
             'known_faces_count': len(self._known_names),
             'detect_every_n_frames': self._detect_every_n_frames,
@@ -1368,7 +1371,7 @@ class FaceRecognitionProcessBridge:
         backend=None,
     ):
         self._enabled_requested = bool(enabled)
-        self._requested_backend = backend
+        self._requested_backend = backend if backend is not None else FACE_RECOGNITION_BACKEND
         self._lock = threading.Lock()
         self._stop_collector = threading.Event()
 
@@ -1381,6 +1384,8 @@ class FaceRecognitionProcessBridge:
         self._last_status = {
             'enabled': self._enabled_requested,
             'available': False,
+            'backend': 'none',
+            'requested_backend': self._requested_backend,
             'message': 'disabled by configuration',
             'known_faces_count': 0,
             'detect_every_n_frames': max(1, int(detect_every_n_frames)),
@@ -1493,6 +1498,51 @@ class FaceRecognitionProcessBridge:
 
         if self._collector is not None and self._collector.is_alive():
             self._collector.join(timeout=1)
+
+
+def _get_supported_face_backends():
+    supported_backends = []
+
+    opencv_available = (
+        cv2 is not None
+        and hasattr(cv2, 'FaceDetectorYN_create')
+        and hasattr(cv2, 'FaceRecognizerSF_create')
+        and os.path.isfile(FACE_RECOGNITION_YUNET_MODEL_PATH)
+        and os.path.isfile(FACE_RECOGNITION_SFACE_MODEL_PATH)
+    )
+    dlib_available = face_recognition is not None
+
+    if opencv_available or dlib_available:
+        if opencv_available and dlib_available:
+            auto_label = 'Auto (opencv -> dlib)'
+        elif opencv_available:
+            auto_label = 'Auto (opencv only)'
+        else:
+            auto_label = 'Auto (dlib only)'
+        supported_backends.append({
+            'id': 'auto',
+            'label': auto_label,
+        })
+
+    if opencv_available:
+        supported_backends.append({
+            'id': 'opencv',
+            'label': 'OpenCV (YuNet + SFace)',
+        })
+
+    if dlib_available:
+        supported_backends.append({
+            'id': 'dlib',
+            'label': 'dlib (HOG + ResNet)',
+        })
+
+    return supported_backends
+
+
+def _face_settings_payload():
+    status = face_recognition_service.get_status()
+    status['supported_backends'] = _get_supported_face_backends()
+    return status
 
 
 class FrameBroadcaster:
@@ -1727,6 +1777,14 @@ def _safe_ws_close(ws, name):
     except Exception as e:
         print(f'{name} close ignored: {e}')
 
+
+@app.after_request
+def close_http_connection(response):
+    """Reduce idle keep-alive sockets under unsolicited internet scanning."""
+    if response.status_code != 101:
+        response.headers['Connection'] = 'close'
+    return response
+
 @app.route('/')
 def index():
     selected_camera_device = active_camera_device or camera_device_preference or CAMERA_DEVICE
@@ -1752,6 +1810,7 @@ def video_feed_socket(ws):
     """Stream JPEG frames over WebSocket from the shared camera broadcaster."""
     if not ensure_camera_process_running():
         print('📹 Video socket: camera not available')
+        _safe_ws_close(ws, '📹 Video socket')
         return
 
     active_count = _ws_mark_connected('video')
@@ -1789,6 +1848,7 @@ def audio_feed_socket(ws):
     """Stream mono microphone PCM over WebSocket from the shared audio broadcaster."""
     if not ensure_audio_capture_process_running():
         print('🎤 Audio socket: audio process not available after restart attempt')
+        _safe_ws_close(ws, '🎤 Audio socket')
         return
 
     active_count = _ws_mark_connected('audio')
@@ -2074,19 +2134,27 @@ def face_status():
 
 face_recognition_service_lock = threading.Lock()
 
+@app.route('/face_settings', methods=['GET'])
+def get_face_settings():
+    return jsonify(_face_settings_payload())
+
+
 @app.route('/face_settings', methods=['POST'])
 def set_face_settings():
     global face_recognition_service
 
     payload = request.get_json(silent=True) or {}
+    supported_backends = _get_supported_face_backends()
+    supported_backend_ids = {item['id'] for item in supported_backends}
 
     if 'enabled' not in payload and 'backend' not in payload:
         return jsonify({'status': 'error', 'message': 'Provide enabled and/or backend'}), 400
 
     enabled = bool(payload.get('enabled', True))
     backend = str(payload.get('backend', 'auto')).lower()
-    if backend not in ('auto', 'opencv', 'dlib'):
-        return jsonify({'status': 'error', 'message': 'backend must be auto, opencv, or dlib'}), 400
+    if backend not in supported_backend_ids:
+        supported_list = ', '.join(item['id'] for item in supported_backends) or 'none'
+        return jsonify({'status': 'error', 'message': f'backend must be one of: {supported_list}'}), 400
 
     with face_recognition_service_lock:
         old_service = face_recognition_service
@@ -2103,7 +2171,7 @@ def set_face_settings():
         face_recognition_service = new_service
         video_broadcaster._on_frame = new_service.process_frame if new_service.accepts_frames() else None
 
-    return jsonify({'status': 'ok', **face_recognition_service.get_status()})
+    return jsonify({'status': 'ok', **_face_settings_payload()})
 
 @app.route('/server_audio_devices', methods=['GET'])
 def server_audio_devices():
