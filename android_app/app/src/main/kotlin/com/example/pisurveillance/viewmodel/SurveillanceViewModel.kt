@@ -151,13 +151,29 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
             }
             launch {
                 videoStreamManager?.faceData?.collect { data ->
-                    _faceData.postValue(data)
-                    
-                    // Update configuration status ONLY if the WebSocket message contains 
-                    // actual configuration data AND we aren't currently applying a manual update.
-                    // This prevents "flickering" where a background update reverts a user action.
+                    // Update REAL-TIME detection results
+                    // Guard against stale "enabled" signals from WebSocket during manual override
                     val now = System.currentTimeMillis()
-                    if (data != null && data.backend != null && (now - lastManualFaceUpdateAt > 5000)) {
+                    val isLocked = now - lastManualFaceUpdateAt < 5000
+                    
+                    if (isLocked) {
+                        // During lock period, strictly follow the manual status LiveData
+                        val manualEnabled = _faceStatus.value?.enabled ?: true
+                        if (manualEnabled && data != null && data.enabled) {
+                            _faceData.postValue(data)
+                        } else {
+                            _faceData.postValue(null)
+                        }
+                    } else {
+                        // After lock, follow the stream data
+                        _faceData.postValue(data)
+                        if (data != null && !data.enabled) {
+                            _faceData.postValue(null)
+                        }
+                    }
+
+                    // Update CONFIGURATION status (dropdowns, backend, etc.)
+                    if (data != null && data.backend != null && !isLocked) {
                         val currentStatus = _faceStatus.value
                         _faceStatus.postValue(FaceStatusResponse(
                             enabled = data.enabled,
@@ -469,6 +485,12 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      */
     fun updateFaceSettings(enabled: Boolean, backend: String = "auto") {
         lastManualFaceUpdateAt = System.currentTimeMillis()
+        
+        // If disabling, immediately clear the current overlay data locally
+        if (!enabled) {
+            _faceData.postValue(null)
+        }
+
         viewModelScope.launch {
             try {
                 val service = apiService ?: return@launch

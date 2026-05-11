@@ -100,6 +100,11 @@ class VideoStreamManager(
                         } else if (type == "face_data") {
                             val data = gson.fromJson(text, FaceAiData::class.java)
                             _faceData.value = data
+                            
+                            // If AI is disabled, immediately clear any pending/cached results
+                            if (!data.enabled) {
+                                _faceData.value = null
+                            }
                         }
                     } catch (e: Exception) {
                         Timber.w("Failed to parse text message: $text")

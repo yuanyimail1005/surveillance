@@ -51,7 +51,12 @@ class FaceOverlayView @JvmOverloads constructor(
      * Buffer face data by its sequence number for synchronization
      */
     fun setFaceData(result: FaceDetectionResult?) {
-        if (result == null) return
+        if (result == null) {
+            faceResult = null
+            pendingFaceResults.clear()
+            invalidate()
+            return
+        }
         
         val seq = result.broadcastFrameSeq ?: 0
         if (seq <= 0) {
@@ -90,6 +95,13 @@ class FaceOverlayView @JvmOverloads constructor(
             // Cleanup older results
             val toRemove = pendingFaceResults.keys.filter { it < matchingSeq }
             toRemove.forEach { pendingFaceResults.remove(it) }
+        } else {
+            // If no results for current or past sequences, check if the current one is too old
+            val resultSeq = faceResult?.broadcastFrameSeq ?: 0
+            // If we are more than 5 frames ahead of the last box, clear it (no "ghost" boxes)
+            if (resultSeq > 0 && currentFrameSeq - resultSeq > 5) {
+                faceResult = null
+            }
         }
     }
 
