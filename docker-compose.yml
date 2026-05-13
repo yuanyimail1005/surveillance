@@ -1,8 +1,6 @@
 services:
   surveillance:
     container_name: surveillance
-    # Default to Raspberry Pi (arm64); override on x86 with DOCKER_PLATFORM=linux/amd64
-    platform: ${DOCKER_PLATFORM:-linux/arm64}
     build:
       context: .
       dockerfile: Dockerfile
