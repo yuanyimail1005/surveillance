@@ -14,8 +14,13 @@ WORKDIR /app
 # - ffmpeg for V4L2 MJPEG capture
 # - pulseaudio-utils for pactl/parec/pacat
 # - v4l-utils for v4l2-ctl probing
-# - rpicam-apps for CSI camera discovery and streaming
+# - rpicam-apps for CSI camera discovery and streaming (ARM only)
 RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    EXTRA_PACKAGES=""; \
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "armhf" ]; then \
+        EXTRA_PACKAGES="rpicam-apps"; \
+    fi; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python3 \
@@ -30,7 +35,7 @@ RUN set -eux; \
         pulseaudio \
         pulseaudio-utils \
         v4l-utils \
-        rpicam-apps \
+        ${EXTRA_PACKAGES} \
         ca-certificates; \
     python3 -m venv "$VIRTUAL_ENV"; \
     "$VIRTUAL_ENV/bin/pip" install --upgrade pip setuptools wheel; \
