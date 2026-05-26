@@ -113,6 +113,8 @@ pulseaudio_started_by_app = False
 echo_cancel_module_id = None
 device_switch_lock = threading.Lock()
 audio_proc_lock = threading.Lock()
+subscriber_count_lock = threading.Lock()
+active_stream_subscribers = 0
 
 def list_capture_devices():
     """Return available PulseAudio capture sources plus default."""
@@ -533,6 +535,104 @@ def stop_pulse_pipeline():
             except Exception:
                 pass
         pulse_proc = None
+
+
+def stop_audio_capture_process():
+    """Stop audio capture process if running."""
+    global audio_proc
+
+    with audio_proc_lock:
+        if audio_proc is not None:
+            try:
+                audio_proc.terminate()
+                audio_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    audio_proc.kill()
+                    audio_proc.wait(timeout=1)
+                except Exception:
+                    pass
+            audio_proc = None
+
+        if 'audio_broadcaster' in globals():
+            audio_broadcaster.set_proc(audio_proc)
+
+
+def stop_camera_process():
+    """Stop camera process if running."""
+    global camera_proc
+
+    with camera_proc_lock:
+        if camera_proc is not None:
+            try:
+                camera_proc.terminate()
+                camera_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    camera_proc.kill()
+                    camera_proc.wait(timeout=1)
+                except Exception:
+                    pass
+            camera_proc = None
+
+        if 'video_broadcaster' in globals():
+            video_broadcaster.set_proc(camera_proc)
+
+
+def start_realtime_processes_for_subscribers():
+    """Ensure camera/audio/pulse processes are running for active subscribers."""
+    camera_ok = ensure_camera_process_running()
+    audio_ok = ensure_audio_capture_process_running()
+    pulse_ok = start_pulse_process()
+
+    if not camera_ok:
+        print('⚠ Subscriber-triggered start: camera unavailable')
+    if not audio_ok:
+        print('⚠ Subscriber-triggered start: audio capture unavailable')
+    if not pulse_ok:
+        print('⚠ Subscriber-triggered start: PulseAudio playback unavailable')
+
+
+def stop_realtime_processes_if_idle():
+    """Stop camera/audio/pulse processes when no subscribers are connected."""
+    stop_camera_process()
+    stop_audio_capture_process()
+    stop_pulse_pipeline()
+    print('✓ No subscribers active: stopped camera/audio/pulse processes')
+
+
+def on_stream_subscriber_connected(endpoint):
+    """Track subscriber count and start processes on transition 0 -> 1."""
+    global active_stream_subscribers
+
+    should_start = False
+    with subscriber_count_lock:
+        previous = active_stream_subscribers
+        active_stream_subscribers += 1
+        current = active_stream_subscribers
+        if previous == 0:
+            should_start = True
+
+    print(f'↗ Subscriber connected ({endpoint}); active subscribers={current}')
+    if should_start:
+        print('⚙ First subscriber connected: starting realtime processes')
+        start_realtime_processes_for_subscribers()
+
+
+def on_stream_subscriber_disconnected(endpoint):
+    """Track subscriber count and stop processes on transition 1 -> 0."""
+    global active_stream_subscribers
+
+    should_stop = False
+    with subscriber_count_lock:
+        active_stream_subscribers = max(0, active_stream_subscribers - 1)
+        current = active_stream_subscribers
+        if current == 0:
+            should_stop = True
+
+    print(f'↘ Subscriber disconnected ({endpoint}); active subscribers={current}')
+    if should_stop:
+        stop_realtime_processes_if_idle()
 
 if start_pulse_process():
     print("🎵 Direct audio write mode enabled (no intermediate queue)")
@@ -1674,6 +1774,9 @@ audio_broadcaster = FrameBroadcaster('audio', _audio_chunks_gen)
 video_broadcaster.set_proc(camera_proc)
 audio_broadcaster.set_proc(audio_proc)
 
+# Start in idle mode. Realtime processes are started on first subscriber.
+stop_realtime_processes_if_idle()
+
 WS_METRICS_LOG_EVERY_SECONDS = 60
 ws_metrics_lock = threading.Lock()
 ws_metrics = {
@@ -1808,9 +1911,12 @@ def index():
 @sock.route('/video_feed')
 def video_feed_socket(ws):
     """Stream JPEG frames over WebSocket from the shared camera broadcaster."""
+    on_stream_subscriber_connected('video')
+
     if not ensure_camera_process_running():
         print('📹 Video socket: camera not available')
         _safe_ws_close(ws, '📹 Video socket')
+        on_stream_subscriber_disconnected('video')
         return
 
     active_count = _ws_mark_connected('video')
@@ -1841,14 +1947,18 @@ def video_feed_socket(ws):
         _safe_ws_close(ws, '📹 Video socket')
         active_count = _ws_mark_disconnected('video')
         print(f'📹 Video socket disconnected (active={active_count})')
+        on_stream_subscriber_disconnected('video')
 
 
 @sock.route('/audio_feed')
 def audio_feed_socket(ws):
     """Stream mono microphone PCM over WebSocket from the shared audio broadcaster."""
+    on_stream_subscriber_connected('audio')
+
     if not ensure_audio_capture_process_running():
         print('🎤 Audio socket: audio process not available after restart attempt')
         _safe_ws_close(ws, '🎤 Audio socket')
+        on_stream_subscriber_disconnected('audio')
         return
 
     active_count = _ws_mark_connected('audio')
@@ -1877,6 +1987,7 @@ def audio_feed_socket(ws):
         _safe_ws_close(ws, '🎤 Audio socket')
         active_count = _ws_mark_disconnected('audio')
         print(f'🎤 Audio socket disconnected (active={active_count})')
+        on_stream_subscriber_disconnected('audio')
 
 def convert_mono_to_stereo(mono_data):
     """Convert mono audio to stereo and apply configurable playback gain."""
@@ -1906,6 +2017,8 @@ def convert_mono_to_stereo(mono_data):
 @sock.route('/ws/talk')
 def talk_audio_socket(ws):
     """Receive mono PCM from the browser over WebSocket and play it immediately."""
+    on_stream_subscriber_connected('talk')
+
     active_count = _ws_mark_connected('talk')
     print(f'🎙 WebSocket talkback connected (active={active_count})')
     message_count = 0
@@ -1940,6 +2053,7 @@ def talk_audio_socket(ws):
         _safe_ws_close(ws, '🎙 Talkback socket')
         active_count = _ws_mark_disconnected('talk')
         print(f'🎙 WebSocket talkback disconnected (active={active_count})')
+        on_stream_subscriber_disconnected('talk')
 
 
 @app.route('/speaker_volume', methods=['GET'])
@@ -2304,10 +2418,6 @@ if __name__ == '__main__':
         print("\nShutting down...")
     finally:
         face_recognition_service.stop()
-        stop_pulse_pipeline()
+        stop_realtime_processes_if_idle()
         _teardown_pulseaudio_echo_cancel()
         stop_pulseaudio_daemon_if_started_by_app()
-        if camera_proc:
-            camera_proc.terminate()
-        if audio_proc:
-            audio_proc.terminate()
