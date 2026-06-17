@@ -144,17 +144,17 @@ class FaceOverlayView @JvmOverloads constructor(
             scaleX = targetWidth.toFloat() / result.imageWidth
             scaleY = targetHeight.toFloat() / result.imageHeight
         } else {
-            // On UI Overlay (View), we must account for 'fitCenter' scaling of the ImageView
+            // On UI Overlay (View), we must account for fitting scaling of the View
             val viewAspect = targetWidth.toFloat() / targetHeight
             val imageAspect = result.imageWidth.toFloat() / result.imageHeight
 
             if (imageAspect > viewAspect) {
-                // Image is wider than view (Pillarboxing)
+                // Image is wider than view (Letterboxing - bars on top/bottom)
                 scaleX = targetWidth.toFloat() / result.imageWidth
                 scaleY = scaleX
                 offsetY = (targetHeight - (result.imageHeight * scaleY)) / 2f
             } else {
-                // Image is taller than view (Letterboxing)
+                // Image is taller than view (Pillarboxing - bars on sides)
                 scaleY = targetHeight.toFloat() / result.imageHeight
                 scaleX = scaleY
                 offsetX = (targetWidth - (result.imageWidth * scaleX)) / 2f

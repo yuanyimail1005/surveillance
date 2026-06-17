@@ -33,6 +33,12 @@ class TalkbackManager(
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
 
+    private var onDataRead: ((ByteArray) -> Unit)? = null
+
+    fun setOnDataReadListener(listener: ((ByteArray) -> Unit)?) {
+        onDataRead = listener
+    }
+
     companion object {
         private const val SAMPLE_RATE = 48000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
@@ -102,6 +108,13 @@ class TalkbackManager(
     }
 
     /**
+     * Start recording without connecting to WebSocket (useful for WebRTC)
+     */
+    fun startRecordingDirectly() {
+        startRecording()
+    }
+
+    /**
      * Start recording from microphone and sending to server
      */
     @SuppressLint("MissingPermission")
@@ -139,8 +152,11 @@ class TalkbackManager(
                     while (isActive && _isRecording.value) {
                         val bytesRead = record.read(buffer, 0, buffer.size)
                         if (bytesRead > 0) {
-                            val success = webSocket?.send(buffer.toByteString(0, bytesRead)) ?: false
-                            if (!success) {
+                            val data = if (bytesRead == buffer.size) buffer else buffer.copyOfRange(0, bytesRead)
+                            onDataRead?.invoke(data)
+                            
+                            val success = webSocket?.send(data.toByteString()) ?: (onDataRead != null)
+                            if (!success && webSocket != null) {
                                 Timber.w("WebSocket send failed")
                                 break
                             }

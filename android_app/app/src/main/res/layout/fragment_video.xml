@@ -7,20 +7,50 @@
     android:keepScreenOn="true"
     tools:context=".ui.fragments.VideoFragment">
 
-    <!-- Video Display -->
-    <ImageView
-        android:id="@+id/video_display"
+    <!-- Video Container -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/video_container"
         android:layout_width="match_parent"
-        android:layout_height="@dimen/video_player_height"
-        android:contentDescription="@string/video_loading"
-        android:scaleType="fitCenter"
-        android:src="@android:drawable/ic_dialog_info" />
+        android:layout_height="@dimen/video_player_height">
 
-    <!-- Face AI Overlay -->
-    <com.example.pisurveillance.ui.views.FaceOverlayView
-        android:id="@+id/face_overlay"
-        android:layout_width="match_parent"
-        android:layout_height="@dimen/video_player_height" />
+        <!-- Video Display (WebSocket/MJPEG) -->
+        <ImageView
+            android:id="@+id/video_display"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:contentDescription="@string/video_loading"
+            android:scaleType="fitCenter"
+            android:src="@android:drawable/ic_dialog_info"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="16:9"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- Video Display (WebRTC) -->
+        <org.webrtc.SurfaceViewRenderer
+            android:id="@+id/webrtc_video_display"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="16:9"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- Face AI Overlay -->
+        <com.example.pisurveillance.ui.views.FaceOverlayView
+            android:id="@+id/face_overlay"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="16:9"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
 
     <!-- Loading Indicator -->
     <com.google.android.material.progressindicator.CircularProgressIndicator

@@ -10,6 +10,7 @@ import com.example.pisurveillance.api.ApiClient
 import com.example.pisurveillance.api.SurveillanceService
 import com.example.pisurveillance.models.*
 import com.example.pisurveillance.utils.PreferencesManager
+import com.example.pisurveillance.webrtc.WebRtcManager
 import com.example.pisurveillance.websocket.AudioStreamManager
 import com.example.pisurveillance.websocket.TalkbackManager
 import com.example.pisurveillance.websocket.VideoFrame
@@ -18,9 +19,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import org.webrtc.VideoTrack
 import timber.log.Timber
 import java.io.FileOutputStream
+
+enum class StreamMode {
+    WEBSOCKET, WEBRTC
+}
 
 /**
  * Main ViewModel for surveillance system
@@ -79,10 +86,17 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private var videoStreamManager: VideoStreamManager? = null
     private var audioStreamManager: AudioStreamManager? = null
     private var talkbackManager: TalkbackManager? = null
+    private var webRtcManager: WebRtcManager? = null
+
+    private val _streamMode = MutableStateFlow(StreamMode.WEBSOCKET)
+    val streamMode: StateFlow<StreamMode> = _streamMode.asStateFlow()
 
     // Shared State for UI
     private val _videoFrames = MutableStateFlow<VideoFrame?>(null)
     val videoFrames: StateFlow<VideoFrame?> = _videoFrames.asStateFlow()
+
+    private val _videoFrameSeq = MutableStateFlow<Long>(0)
+    val videoFrameSeq: StateFlow<Long> = _videoFrameSeq.asStateFlow()
 
     private val _videoConnected = MutableLiveData(false)
     val videoConnected: LiveData<Boolean> = _videoConnected
@@ -112,9 +126,13 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
             try {
                 val savedAddress = preferencesManager.getServerAddress()
                 val savedPort = preferencesManager.getServerPort()
+                val savedMode = preferencesManager.getStreamMode()
+                
                 _serverAddress.value = savedAddress
                 _serverPort.value = savedPort
                 _recentServers.value = preferencesManager.getRecentServers()
+                _streamMode.value = StreamMode.valueOf(savedMode)
+
                 val url = cleanUrl(savedAddress, savedPort)
                 _serverUrl.value = url
 
@@ -137,65 +155,100 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
     private fun observeManagers() {
         observationJob?.cancel()
         observationJob = viewModelScope.launch {
+            // WebSocket Streams
             launch {
                 videoStreamManager?.frames?.collect { frame ->
-                    _videoFrames.value = frame
-                    // If recording, save the raw data to the stream
-                    if (frame != null && _isRecordingVideo.value == true) {
-                        saveFrameToRecording(frame.rawData)
+                    if (_streamMode.value == StreamMode.WEBSOCKET) {
+                        _videoFrames.value = frame
+                        if (frame != null && _isRecordingVideo.value == true) {
+                            saveFrameToRecording(frame.rawData)
+                        }
                     }
                 }
             }
             launch {
-                videoStreamManager?.isConnected?.collect { _videoConnected.postValue(it) }
+                videoStreamManager?.isConnected?.collect { 
+                    if (_streamMode.value == StreamMode.WEBSOCKET) _videoConnected.postValue(it) 
+                }
             }
             launch {
                 videoStreamManager?.faceData?.collect { data ->
-                    // Update REAL-TIME detection results
-                    // Guard against stale "enabled" signals from WebSocket during manual override
-                    val now = System.currentTimeMillis()
-                    val isLocked = now - lastManualFaceUpdateAt < 5000
-                    
-                    if (isLocked) {
-                        // During lock period, strictly follow the manual status LiveData
-                        val manualEnabled = _faceStatus.value?.enabled ?: true
-                        if (manualEnabled && data != null && data.enabled) {
-                            _faceData.postValue(data)
-                        } else {
-                            _faceData.postValue(null)
-                        }
-                    } else {
-                        // After lock, follow the stream data
-                        _faceData.postValue(data)
-                        if (data != null && !data.enabled) {
-                            _faceData.postValue(null)
-                        }
-                    }
-
-                    // Update CONFIGURATION status (dropdowns, backend, etc.)
-                    if (data != null && data.backend != null && !isLocked) {
-                        val currentStatus = _faceStatus.value
-                        _faceStatus.postValue(FaceStatusResponse(
-                            enabled = data.enabled,
-                            available = data.available,
-                            backend = data.backend,
-                            requestedBackend = data.requestedBackend,
-                            // Preserve existing supported backends if not provided in push
-                            supportedBackends = data.supportedBackends ?: currentStatus?.supportedBackends,
-                            message = data.message ?: currentStatus?.message,
-                            knownFacesCount = data.knownFacesCount ?: currentStatus?.knownFacesCount,
-                            broadcastFrameSeq = data.broadcastFrameSeq,
-                            result = data.result
-                        ))
+                    if (_streamMode.value == StreamMode.WEBSOCKET) {
+                        handleFaceData(data)
                     }
                 }
             }
+            
+            // WebRTC Streams
+            launch {
+                webRtcManager?.isConnected?.collect { 
+                    if (_streamMode.value == StreamMode.WEBRTC) {
+                        _videoConnected.postValue(it)
+                        _audioConnected.postValue(it)
+                    }
+                }
+            }
+            launch {
+                webRtcManager?.faceData?.collect { data ->
+                    if (_streamMode.value == StreamMode.WEBRTC) {
+                        handleFaceData(data)
+                    }
+                }
+            }
+            launch {
+                webRtcManager?.currentFrameSeq?.collect { seq ->
+                    if (_streamMode.value == StreamMode.WEBRTC && seq > 0) {
+                        // In WebRTC mode, we notify the overlay directly from the metadata stream
+                        // since there isn't a discrete 'VideoFrame' object passing through the VM
+                        _videoFrameSeq.value = seq
+                    }
+                }
+            }
+
             launch {
                 audioStreamManager?.isConnected?.collect { _audioConnected.postValue(it) }
             }
             launch {
                 talkbackManager?.isConnected?.collect { _talkbackConnected.postValue(it) }
             }
+        }
+    }
+
+    private fun handleFaceData(data: FaceAiData?) {
+        // Guard against stale "enabled" signals from WebSocket during manual override
+        val now = System.currentTimeMillis()
+        val isLocked = now - lastManualFaceUpdateAt < 5000
+        
+        if (isLocked) {
+            // During lock period, strictly follow the manual status LiveData
+            val manualEnabled = _faceStatus.value?.enabled ?: true
+            if (manualEnabled && data != null && data.enabled) {
+                _faceData.postValue(data)
+            } else {
+                _faceData.postValue(null)
+            }
+        } else {
+            // After lock, follow the stream data
+            _faceData.postValue(data)
+            if (data != null && !data.enabled) {
+                _faceData.postValue(null)
+            }
+        }
+
+        // Update CONFIGURATION status (dropdowns, backend, etc.)
+        if (data != null && data.backend != null && !isLocked) {
+            val currentStatus = _faceStatus.value
+            _faceStatus.postValue(FaceStatusResponse(
+                enabled = data.enabled,
+                available = data.available,
+                backend = data.backend,
+                requestedBackend = data.requestedBackend,
+                supportedBackends = data.supportedBackends ?: currentStatus?.supportedBackends,
+                message = data.message ?: currentStatus?.message,
+                knownFacesCount = data.knownFacesCount ?: currentStatus?.knownFacesCount,
+                broadcastFrameSeq = data.broadcastFrameSeq,
+                result = data.result
+            ))
         }
     }
 
@@ -206,6 +259,16 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
         videoStreamManager = VideoStreamManager(url, client)
         audioStreamManager = AudioStreamManager(url, client)
         talkbackManager = TalkbackManager(url, client)
+        
+        talkbackManager?.setOnDataReadListener { data ->
+            if (_streamMode.value == StreamMode.WEBRTC) {
+                webRtcManager?.sendTalkbackData(data)
+            }
+        }
+        
+        apiService?.let {
+            webRtcManager = WebRtcManager(context, it)
+        }
     }
 
     private fun initializeApiService(url: String) {
@@ -215,6 +278,10 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
             getApplication(),
             certificatePinning = false
         )
+        // Re-initialize WebRtcManager after apiService is created
+        apiService?.let {
+            webRtcManager = WebRtcManager(getApplication(), it)
+        }
     }
 
     /**
@@ -234,8 +301,12 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
                 fetchSpeakerVolume()
                 fetchFaceStatus()
 
-                videoStreamManager?.connect()
-                audioStreamManager?.connect()
+                if (_streamMode.value == StreamMode.WEBRTC) {
+                    webRtcManager?.connect()
+                } else {
+                    videoStreamManager?.connect()
+                    audioStreamManager?.connect()
+                }
             } catch (e: Exception) {
                 Timber.e(e, "Connection failed")
                 _connectionError.postValue(e.message ?: "Connection failed")
@@ -251,8 +322,25 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
         videoStreamManager?.disconnect()
         audioStreamManager?.disconnect()
         talkbackManager?.disconnect()
+        webRtcManager?.disconnect()
         _isConnected.value = false
     }
+
+    fun setStreamMode(mode: StreamMode) {
+        if (_streamMode.value != mode) {
+            _streamMode.value = mode
+            viewModelScope.launch {
+                preferencesManager.setStreamMode(mode.name)
+            }
+            if (_isConnected.value == true) {
+                // Reconnect with new mode
+                disconnect()
+                connect()
+            }
+        }
+    }
+
+    fun getWebRtcManager() = webRtcManager
 
     /**
      * Fetch current server status
@@ -404,7 +492,14 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      * Start talkback
      */
     fun startTalkback() {
-        talkbackManager?.connect()
+        if (_streamMode.value == StreamMode.WEBRTC) {
+            // Use local recording and send via WebRTC DataChannel
+            // We need a public method in TalkbackManager to just start recording
+            // For now, I'll use a hack or add the method.
+            talkbackManager?.startRecordingDirectly()
+        } else {
+            talkbackManager?.connect()
+        }
     }
 
     /**

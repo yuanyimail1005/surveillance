@@ -70,4 +70,14 @@ interface SurveillanceService {
     suspend fun updateFaceSettings(
         @Body request: FaceSettingsRequest
     ): Response<FaceSettingsResponse>
+    /**
+     * WebRTC signaling: Connect and exchange SDP
+     */
+    @POST("webrtc/connect")
+    suspend fun connectWebRtc(@Body sdp: WebRtcSdp): Response<WebRtcSdp>
 }
+
+data class WebRtcSdp(
+    val sdp: String,
+    val type: String
+)

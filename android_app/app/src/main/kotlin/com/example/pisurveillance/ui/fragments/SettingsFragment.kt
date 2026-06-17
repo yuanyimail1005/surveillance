@@ -11,6 +11,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.pisurveillance.MainActivity
 import com.example.pisurveillance.R
 import com.example.pisurveillance.databinding.FragmentSettingsBinding
+import com.example.pisurveillance.viewmodel.StreamMode
 import kotlinx.coroutines.launch
 
 /**
@@ -37,10 +38,30 @@ class SettingsFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        setupStreamModeSettings()
         setupServerConnection()
         setupCameraSettings()
         setupFaceAiSettings()
         setupAudioSettings()
+    }
+
+    private fun setupStreamModeSettings() {
+        val modes = StreamMode.values().map { it.name }
+        val adapter = ArrayAdapter(requireContext(), R.layout.list_item_dropdown, modes)
+        binding.streamModeSpinner.setAdapter(adapter)
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel?.streamMode?.collect { mode ->
+                if (binding.streamModeSpinner.text.toString() != mode.name) {
+                    binding.streamModeSpinner.setText(mode.name, false)
+                }
+            }
+        }
+
+        binding.streamModeSpinner.setOnItemClickListener { _, _, position, _ ->
+            val selectedMode = StreamMode.valueOf(modes[position])
+            viewModel?.setStreamMode(selectedMode)
+        }
     }
 
     /**

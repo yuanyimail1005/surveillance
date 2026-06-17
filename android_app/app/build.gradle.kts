@@ -88,4 +88,7 @@ dependencies {
 
     // Logging
     implementation(libs.timber)
+
+    // WebRTC
+    implementation("io.github.webrtc-sdk:android:114.5735.02")
 }

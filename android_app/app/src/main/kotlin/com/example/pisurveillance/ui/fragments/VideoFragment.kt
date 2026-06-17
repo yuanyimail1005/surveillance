@@ -13,6 +13,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.constraintlayout.widget.ConstraintSet
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
@@ -22,6 +23,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.pisurveillance.MainActivity
 import com.example.pisurveillance.R
 import com.example.pisurveillance.databinding.FragmentVideoBinding
+import com.example.pisurveillance.viewmodel.StreamMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -55,6 +57,7 @@ class VideoFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        initWebRtc()
         setupVideoDisplay()
         setupStatusDisplays()
         setupTalkbackButton()
@@ -63,19 +66,63 @@ class VideoFragment : Fragment() {
         observeRecordingState()
     }
 
+    private fun initWebRtc() {
+        val rtcManager = viewModel?.getWebRtcManager() ?: return
+        binding.webrtcVideoDisplay.init(rtcManager.eglBase.eglBaseContext, null)
+        binding.webrtcVideoDisplay.setEnableHardwareScaler(true)
+        binding.webrtcVideoDisplay.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+    }
+
     /**
      * Setup video display to show incoming frames
      */
     private fun setupVideoDisplay() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel?.videoFrames?.collectLatest { frame ->
-                    if (frame != null) {
-                        binding.videoDisplay.setImageBitmap(frame.bitmap)
-                        binding.faceOverlay.notifyVideoFrameReceived(frame.sequence)
-                        binding.loadingSpinner.visibility = View.GONE
-                    } else {
-                        binding.loadingSpinner.visibility = View.VISIBLE
+                launch {
+                    viewModel?.streamMode?.collect { mode ->
+                        if (mode == StreamMode.WEBRTC) {
+                            binding.videoDisplay.visibility = View.GONE
+                            binding.webrtcVideoDisplay.visibility = View.VISIBLE
+                        } else {
+                            binding.videoDisplay.visibility = View.VISIBLE
+                            binding.webrtcVideoDisplay.visibility = View.GONE
+                        }
+                    }
+                }
+
+                launch {
+                    viewModel?.videoFrames?.collectLatest { frame ->
+                        if (viewModel?.streamMode?.value == StreamMode.WEBSOCKET) {
+                            if (frame != null) {
+                                binding.videoDisplay.setImageBitmap(frame.bitmap)
+                                binding.faceOverlay.notifyVideoFrameReceived(frame.sequence)
+                                binding.loadingSpinner.visibility = View.GONE
+                            } else {
+                                binding.loadingSpinner.visibility = View.VISIBLE
+                            }
+                        }
+                    }
+                }
+
+                launch {
+                    viewModel?.videoFrameSeq?.collect { seq ->
+                        if (viewModel?.streamMode?.value == StreamMode.WEBRTC && seq > 0) {
+                            binding.faceOverlay.notifyVideoFrameReceived(seq)
+                        }
+                    }
+                }
+
+                launch {
+                    viewModel?.getWebRtcManager()?.remoteVideoTrack?.collect { track ->
+                        if (viewModel?.streamMode?.value == StreamMode.WEBRTC) {
+                            if (track != null) {
+                                track.addSink(binding.webrtcVideoDisplay)
+                                binding.loadingSpinner.visibility = View.GONE
+                            } else {
+                                binding.loadingSpinner.visibility = View.VISIBLE
+                            }
+                        }
                     }
                 }
             }
@@ -250,8 +297,27 @@ class VideoFragment : Fragment() {
         }
 
         viewModel?.faceData?.observe(viewLifecycleOwner) { faceAiData ->
-            binding.faceOverlay.setFaceData(faceAiData?.result)
+            val result = faceAiData?.result
+            if (result != null) {
+                updateVideoAspectRatio(result.imageWidth, result.imageHeight)
+            }
+            binding.faceOverlay.setFaceData(result)
         }
+    }
+
+    private fun updateVideoAspectRatio(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        
+        val ratio = "$width:$height"
+        val constraintSet = ConstraintSet()
+        constraintSet.clone(binding.videoContainer)
+        
+        // Update ratios for all video-related views
+        constraintSet.setDimensionRatio(binding.videoDisplay.id, ratio)
+        constraintSet.setDimensionRatio(binding.webrtcVideoDisplay.id, ratio)
+        constraintSet.setDimensionRatio(binding.faceOverlay.id, ratio)
+        
+        constraintSet.applyTo(binding.videoContainer)
     }
 
     /**
@@ -304,6 +370,7 @@ class VideoFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        binding.webrtcVideoDisplay.release()
         _binding = null
     }
 }

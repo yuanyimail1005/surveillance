@@ -33,6 +33,20 @@ class PreferencesManager(private val context: Context) {
         private val LAST_PLAYBACK_DEVICE = stringPreferencesKey("last_playback_device")
         private val TALKBACK_ENABLED = booleanPreferencesKey("talkback_enabled")
         private val RECENT_SERVERS = stringPreferencesKey("recent_servers")
+        private val STREAM_MODE = stringPreferencesKey("stream_mode")
+    }
+
+    // Stream Mode
+    suspend fun setStreamMode(mode: String) {
+        context.dataStore.edit { prefs ->
+            prefs[STREAM_MODE] = mode
+        }
+    }
+
+    suspend fun getStreamMode(): String {
+        return context.dataStore.data.map { prefs ->
+            prefs[STREAM_MODE] ?: "WEBSOCKET"
+        }.first()
     }
 
     // Recent Servers
