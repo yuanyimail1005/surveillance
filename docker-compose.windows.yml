@@ -35,7 +35,7 @@ services:
       FACE_RECOGNITION_BACKEND: ${FACE_RECOGNITION_BACKEND:-auto}
 
       # Camera defaults for WSL2 USB passthrough
-      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
+      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video1}
       CAMERA_WIDTH: ${CAMERA_WIDTH:-1920}
       CAMERA_HEIGHT: ${CAMERA_HEIGHT:-1080}
       CAMERA_FPS: ${CAMERA_FPS:-25}
@@ -44,6 +44,6 @@ services:
       - ${CERTS_DIR:-./certs}:/certs:ro
       - ${FACE_RECOGNITION_KNOWN_FACES_DIR:-./known_faces}:/known_faces:ro
 
-    # Uncomment if webcam is attached into WSL2 with usbipd and /dev/video0 exists.
+    # Uncomment if webcam is attached into WSL2 with usbipd and /dev/video1 exists.
     devices:
-      - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
+      - ${CAMERA_DEVICE:-/dev/video1}:${CAMERA_DEVICE:-/dev/video1}
