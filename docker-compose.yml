@@ -29,7 +29,7 @@ services:
       SSL_KEY_PATH: /certs/key.pem
     volumes:
       - /home/eric/certs:/certs:ro
-      - ${FACE_RECOGNITION_KNOWN_FACES_DIR:-./known_faces}:/known_faces:ro
+      - ${FACE_RECOGNITION_KNOWN_FACES_DIR:-./known_faces}:/known_faces
       - /dev:/dev
       - /dev/snd:/dev/snd
       - /run/udev:/run/udev:ro
