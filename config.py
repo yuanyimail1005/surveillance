@@ -54,12 +54,13 @@ SPEAKER_VOLUME_CONTROLS = ('Speaker', 'PCM', 'Master', 'Headphone')
 
 SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.environ.get('SERVER_PORT', '5000'))
-SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', '/home/eric/certs/cert.pem')
-SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', '/home/eric/certs/key.pem')
+_user_home = os.path.expanduser('~')
+SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', os.path.join(_user_home, 'certs', 'cert.pem'))
+SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', os.path.join(_user_home, 'certs', 'key.pem'))
 
 FACE_RECOGNITION_ENABLED = os.environ.get('FACE_RECOGNITION_ENABLED', 'false').lower() == 'true'
 FACE_RECOGNITION_KNOWN_FACES_DIR = os.path.abspath(os.path.expanduser(
-    os.environ.get('FACE_RECOGNITION_KNOWN_FACES_DIR', '/home/eric/known_faces')
+    os.environ.get('FACE_RECOGNITION_KNOWN_FACES_DIR', os.path.join(_user_home, 'known_faces'))
 ))
 _detect_n_env = os.environ.get('FACE_RECOGNITION_DETECT_EVERY_N_FRAMES')
 FACE_RECOGNITION_DETECT_EVERY_N_FRAMES = max(1, int(_detect_n_env)) if _detect_n_env else None  # None = auto (fps // 2)
