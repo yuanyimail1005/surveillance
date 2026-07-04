@@ -41,6 +41,13 @@ android {
         dataBinding = true
         buildConfig = true
     }
+
+    packaging {
+        jniLibs {
+            // This is required for 16 KB page size compatibility in Android 15
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {

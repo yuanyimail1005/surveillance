@@ -206,6 +206,12 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
             }
 
             launch {
+                webRtcManager?.isTalkbackActive?.collect { 
+                    if (_streamMode.value == StreamMode.WEBRTC) _talkbackConnected.postValue(it)
+                }
+            }
+
+            launch {
                 audioStreamManager?.isConnected?.collect { _audioConnected.postValue(it) }
             }
             launch {
@@ -259,12 +265,6 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
         videoStreamManager = VideoStreamManager(url, client)
         audioStreamManager = AudioStreamManager(url, client)
         talkbackManager = TalkbackManager(url, client)
-        
-        talkbackManager?.setOnDataReadListener { data ->
-            if (_streamMode.value == StreamMode.WEBRTC) {
-                webRtcManager?.sendTalkbackData(data)
-            }
-        }
         
         apiService?.let {
             webRtcManager = WebRtcManager(context, it)
@@ -493,10 +493,7 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      */
     fun startTalkback() {
         if (_streamMode.value == StreamMode.WEBRTC) {
-            // Use local recording and send via WebRTC DataChannel
-            // We need a public method in TalkbackManager to just start recording
-            // For now, I'll use a hack or add the method.
-            talkbackManager?.startRecordingDirectly()
+            webRtcManager?.startTalkback()
         } else {
             talkbackManager?.connect()
         }
@@ -506,7 +503,11 @@ class SurveillanceViewModel(application: Application) : AndroidViewModel(applica
      * Stop talkback
      */
     fun stopTalkback() {
-        talkbackManager?.disconnect()
+        if (_streamMode.value == StreamMode.WEBRTC) {
+            webRtcManager?.stopTalkback()
+        } else {
+            talkbackManager?.disconnect()
+        }
     }
 
     /**

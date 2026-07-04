@@ -12,8 +12,8 @@ import okio.ByteString.Companion.toByteString
 import timber.log.Timber
 
 /**
- * Manages talkback audio WebSocket connection - send microphone audio to server
- * Audio format: 48kHz, mono, 16-bit PCM
+ * Manages talkback audio connection - send microphone audio to server via WebSocket.
+ * Audio format: 48kHz, mono, 16-bit PCM.
  */
 class TalkbackManager(
     private val serverUrl: String,
@@ -33,17 +33,11 @@ class TalkbackManager(
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
 
-    private var onDataRead: ((ByteArray) -> Unit)? = null
-
-    fun setOnDataReadListener(listener: ((ByteArray) -> Unit)?) {
-        onDataRead = listener
-    }
-
     companion object {
         private const val SAMPLE_RATE = 48000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        private const val FRAME_SIZE = 2048  // ~42ms at 48kHz
+        private const val FRAME_SIZE = 2048 // ~42ms at 48kHz
     }
 
     /**
@@ -57,7 +51,6 @@ class TalkbackManager(
                 .replace(Regex("^http://"), "ws://")
                 .trimEnd('/') + "/ws/talk"
 
-            // Use a specific client with ping to keep connection alive
             val clientWithPing = httpClient.newBuilder()
                 .pingInterval(java.time.Duration.ofSeconds(10))
                 .build()
@@ -72,22 +65,12 @@ class TalkbackManager(
                     startRecording()
                 }
 
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    Timber.d("💬 Talkback message: $text")
-                }
-
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    Timber.e(t, "❌ WebSocket talkback failure")
                     handleConnectionLoss("Failure: ${t.message}")
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    Timber.w("⚠ WebSocket talkback closed: $reason ($code)")
                     handleConnectionLoss(null)
-                }
-
-                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                    webSocket.close(1000, null)
                 }
             })
         } catch (e: Exception) {
@@ -107,26 +90,13 @@ class TalkbackManager(
         webSocket = null
     }
 
-    /**
-     * Start recording without connecting to WebSocket (useful for WebRTC)
-     */
-    fun startRecordingDirectly() {
-        startRecording()
-    }
-
-    /**
-     * Start recording from microphone and sending to server
-     */
     @SuppressLint("MissingPermission")
     private fun startRecording() {
         if (_isRecording.value) return
 
         try {
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-            if (bufferSize <= 0) {
-                Timber.e("Invalid AudioRecord buffer size")
-                return
-            }
+            if (bufferSize <= 0) return
 
             val record = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -137,7 +107,6 @@ class TalkbackManager(
             )
 
             if (record.state != AudioRecord.STATE_INITIALIZED) {
-                Timber.e("AudioRecord failed to initialize")
                 record.release()
                 return
             }
@@ -152,14 +121,9 @@ class TalkbackManager(
                     while (isActive && _isRecording.value) {
                         val bytesRead = record.read(buffer, 0, buffer.size)
                         if (bytesRead > 0) {
-                            val data = if (bytesRead == buffer.size) buffer else buffer.copyOfRange(0, bytesRead)
-                            onDataRead?.invoke(data)
-                            
-                            val success = webSocket?.send(data.toByteString()) ?: (onDataRead != null)
-                            if (!success && webSocket != null) {
-                                Timber.w("WebSocket send failed")
-                                break
-                            }
+                            val data = buffer.copyOfRange(0, bytesRead)
+                            val success = webSocket?.send(data.toByteString()) ?: false
+                            if (!success) break
                         } else if (bytesRead < 0) {
                             Timber.e("AudioRecord read error: $bytesRead")
                             break
@@ -176,16 +140,13 @@ class TalkbackManager(
         } catch (e: Exception) {
             Timber.e(e, "Error starting talkback recording")
             _isRecording.value = false
-            _errorMessage.value = e.message
         }
     }
 
     private fun cleanUpAudioRecord(record: AudioRecord?) {
         try {
             if (record != null) {
-                if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                    record.stop()
-                }
+                if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) record.stop()
                 record.release()
             }
         } catch (e: Exception) {
@@ -197,29 +158,18 @@ class TalkbackManager(
         }
     }
 
-    /**
-     * Stop recording from microphone
-     */
     private fun stopRecording() {
         _isRecording.value = false
         recordingJob?.cancel()
         recordingJob = null
     }
 
-    /**
-     * Disconnect talkback stream
-     */
     fun disconnect() {
-        if (webSocket == null && !_isRecording.value) return
-
         stopRecording()
         webSocket?.close(1000, "Client closing")
         webSocket = null
         _isConnected.value = false
     }
 
-    /**
-     * Check if connected and recording
-     */
-    fun isConnected(): Boolean = _isConnected.value
+    fun isConnected(): Boolean = _isConnected.value || _isRecording.value
 }

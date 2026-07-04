@@ -12,7 +12,6 @@ import org.webrtc.*
 import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
 import timber.log.Timber
-import java.nio.ByteBuffer
 
 /**
  * Manages WebRTC connection for video, audio, and data channels
@@ -27,7 +26,7 @@ class WebRtcManager(
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var faceDataChannel: DataChannel? = null
-    private var talkDataChannel: DataChannel? = null
+    private var localAudioTrack: AudioTrack? = null
     
     private val _faceData = MutableStateFlow<FaceAiData?>(null)
     val faceData: StateFlow<FaceAiData?> = _faceData
@@ -44,8 +43,8 @@ class WebRtcManager(
     private val _remoteAudioTrack = MutableStateFlow<AudioTrack?>(null)
     val remoteAudioTrack: StateFlow<AudioTrack?> = _remoteAudioTrack
 
-    private var localAudioSource: AudioSource? = null
-    private var localAudioTrack: AudioTrack? = null
+    private val _isTalkbackActive = MutableStateFlow(false)
+    val isTalkbackActive: StateFlow<Boolean> = _isTalkbackActive
 
     val eglBase: EglBase = EglBase.create()
     private var audioDeviceModule: AudioDeviceModule? = null
@@ -119,7 +118,7 @@ class WebRtcManager(
                     override fun onAddStream(stream: MediaStream?) {}
                     override fun onRemoveStream(stream: MediaStream?) {}
                     override fun onDataChannel(channel: DataChannel?) {
-                        Timber.d("New DataChannel: ${channel?.label()}")
+                        Timber.d("New Remote DataChannel: ${channel?.label()}")
                     }
                     override fun onRenegotiationNeeded() {}
                     override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
@@ -135,9 +134,30 @@ class WebRtcManager(
                     override fun onTrack(transceiver: RtpTransceiver?) {}
                 })
 
-                // Add transceivers FIRST
+                // Add transceivers
                 peerConnection?.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY))
-                peerConnection?.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY))
+                // Use SEND_RECV for audio to allow talkback
+                peerConnection?.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_RECV))
+
+                // Create local audio track (but don't attach it to peer connection yet, 
+                // PeerConnection.addTransceiver already created a sender)
+                val audioSource = peerConnectionFactory?.createAudioSource(MediaConstraints())
+                localAudioTrack = peerConnectionFactory?.createAudioTrack("local_audio", audioSource)
+                localAudioTrack?.setEnabled(false) // Start muted
+
+                // Find the audio sender and set the track
+                peerConnection?.senders?.forEach { sender ->
+                    if (sender.track()?.kind() == MediaStreamTrack.AUDIO_TRACK_KIND || (sender.track() == null && sender.parameters.encodings.isNotEmpty())) {
+                        // This logic is a bit brittle, usually we'd keep the transceiver reference
+                    }
+                }
+                
+                // Refined: set track on the correct sender
+                peerConnection?.transceivers?.forEach { transceiver ->
+                    if (transceiver.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO) {
+                        transceiver.sender.setTrack(localAudioTrack, true)
+                    }
+                }
 
                 // Create DataChannels
                 val faceInit = DataChannel.Init()
@@ -170,12 +190,6 @@ class WebRtcManager(
                         }
                     }
                 })
-
-                val talkInit = DataChannel.Init().apply {
-                    ordered = false
-                    maxRetransmits = 0
-                }
-                talkDataChannel = peerConnection?.createDataChannel("talk-binary", talkInit)
 
                 // Create offer
                 val constraints = MediaConstraints()
@@ -247,23 +261,20 @@ class WebRtcManager(
     }
 
     fun startTalkback() {
-        // Local audio track not needed if we send raw PCM over DataChannel
-    }
-
-    fun sendTalkbackData(pcmData: ByteArray) {
-        if (talkDataChannel?.state() == DataChannel.State.OPEN) {
-            val buffer = ByteBuffer.wrap(pcmData)
-            talkDataChannel?.send(DataChannel.Buffer(buffer, true))
-        }
+        Timber.d("Starting WebRTC talkback via AudioTrack")
+        localAudioTrack?.setEnabled(true)
+        _isTalkbackActive.value = true
     }
 
     fun stopTalkback() {
-        // Nothing special here if using DataChannel
+        Timber.d("Stopping WebRTC talkback via AudioTrack")
+        localAudioTrack?.setEnabled(false)
+        _isTalkbackActive.value = false
     }
 
     fun disconnect() {
         faceDataChannel?.dispose()
-        talkDataChannel?.dispose()
+        localAudioTrack?.dispose()
         peerConnection?.close()
         peerConnection = null
         _isConnected.value = false
