@@ -1,13 +1,11 @@
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
+from flask_sock import Sock
 import os
-import asyncio
-import inspect
 import subprocess
 import time
 import logging
 import ssl
-import socket
 import glob
 import shutil
 import threading
@@ -19,7 +17,6 @@ import multiprocessing
 import pickle
 import werkzeug.serving
 import importlib
-import fractions
 
 try:
     np = importlib.import_module('numpy')
@@ -76,59 +73,9 @@ from config import (
     SERVER_PORT,
     SSL_CERT_PATH,
     SSL_KEY_PATH,
-    WEBRTC_ICE_SERVERS,
-    WEBRTC_TURN_USERNAME,
-    WEBRTC_TURN_PASSWORD,
-    WEBRTC_MEDIA_PORT_MIN,
-    WEBRTC_MEDIA_PORT_MAX,
 )
 
-try:
-    from aiortc import (
-        RTCPeerConnection,
-        RTCSessionDescription,
-        RTCConfiguration,
-        RTCIceServer,
-        VideoStreamTrack,
-        MediaStreamTrack,
-    )
-    from av import VideoFrame, AudioFrame
-    from av.audio.resampler import AudioResampler
-except Exception:
-    RTCPeerConnection = None
-    RTCSessionDescription = None
-    RTCConfiguration = None
-    RTCIceServer = None
-    VideoStreamTrack = None
-    MediaStreamTrack = None
-    VideoFrame = None
-    AudioFrame = None
-    AudioResampler = None
-
-# Allow module import even when aiortc/av are not installed.
-# WebRTC requests will still fail with a clear runtime error in _create_webrtc_answer.
-if VideoStreamTrack is None:
-    class VideoStreamTrack:  # type: ignore[no-redef]
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def stop(self):
-            pass
-
-if MediaStreamTrack is None:
-    class MediaStreamTrack:  # type: ignore[no-redef]
-        kind = 'audio'
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def stop(self):
-            pass
-
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
-
-if RTCPeerConnection is None:
-    print('⚠ WebRTC dependencies missing (aiortc/av). Install requirements to enable /webrtc/connect.')
 
 # ssl.SSLError (UNEXPECTED_EOF_WHILE_READING) is raised in run_wsgi's finally
 # block when the browser closes an HTTPS streaming connection.  Add it to the
@@ -140,6 +87,7 @@ werkzeug.serving.connection_dropped_errors = (
 
 app = Flask(__name__)
 CORS(app)
+sock = Sock(app)
 
 camera_settings = {
     'width': DEFAULT_CAMERA_WIDTH,
@@ -165,6 +113,8 @@ pulseaudio_started_by_app = False
 echo_cancel_module_id = None
 device_switch_lock = threading.Lock()
 audio_proc_lock = threading.Lock()
+subscriber_count_lock = threading.Lock()
+active_stream_subscribers = 0
 
 def list_capture_devices():
     """Return available PulseAudio capture sources plus default."""
@@ -629,12 +579,60 @@ def stop_camera_process():
             video_broadcaster.set_proc(camera_proc)
 
 
+def start_realtime_processes_for_subscribers():
+    """Ensure camera/audio/pulse processes are running for active subscribers."""
+    camera_ok = ensure_camera_process_running()
+    audio_ok = ensure_audio_capture_process_running()
+    pulse_ok = start_pulse_process()
+
+    if not camera_ok:
+        print('⚠ Subscriber-triggered start: camera unavailable')
+    if not audio_ok:
+        print('⚠ Subscriber-triggered start: audio capture unavailable')
+    if not pulse_ok:
+        print('⚠ Subscriber-triggered start: PulseAudio playback unavailable')
+
+
 def stop_realtime_processes_if_idle():
-    """Stop camera/audio/pulse processes when no active realtime sessions remain."""
+    """Stop camera/audio/pulse processes when no subscribers are connected."""
     stop_camera_process()
     stop_audio_capture_process()
     stop_pulse_pipeline()
-    print('✓ No active realtime sessions: stopped camera/audio/pulse processes')
+    print('✓ No subscribers active: stopped camera/audio/pulse processes')
+
+
+def on_stream_subscriber_connected(endpoint):
+    """Track subscriber count and start processes on transition 0 -> 1."""
+    global active_stream_subscribers
+
+    should_start = False
+    with subscriber_count_lock:
+        previous = active_stream_subscribers
+        active_stream_subscribers += 1
+        current = active_stream_subscribers
+        if previous == 0:
+            should_start = True
+
+    print(f'↗ Subscriber connected ({endpoint}); active subscribers={current}')
+    if should_start:
+        print('⚙ First subscriber connected: starting realtime processes')
+        start_realtime_processes_for_subscribers()
+
+
+def on_stream_subscriber_disconnected(endpoint):
+    """Track subscriber count and stop processes on transition 1 -> 0."""
+    global active_stream_subscribers
+
+    should_stop = False
+    with subscriber_count_lock:
+        active_stream_subscribers = max(0, active_stream_subscribers - 1)
+        current = active_stream_subscribers
+        if current == 0:
+            should_stop = True
+
+    print(f'↘ Subscriber disconnected ({endpoint}); active subscribers={current}')
+    if should_stop:
+        stop_realtime_processes_if_idle()
 
 if start_pulse_process():
     print("🎵 Direct audio write mode enabled (no intermediate queue)")
@@ -1751,460 +1749,6 @@ def _audio_chunks_gen(proc):
         yield chunk
 
 
-def _build_webrtc_configuration():
-    if RTCConfiguration is None or RTCIceServer is None:
-        return None
-
-    ice_servers = []
-    for server in WEBRTC_ICE_SERVERS:
-        kwargs = {'urls': [server]}
-        if server.startswith('turn:') or server.startswith('turns:'):
-            if WEBRTC_TURN_USERNAME:
-                kwargs['username'] = WEBRTC_TURN_USERNAME
-            if WEBRTC_TURN_PASSWORD:
-                kwargs['credential'] = WEBRTC_TURN_PASSWORD
-        ice_servers.append(RTCIceServer(**kwargs))
-    return RTCConfiguration(iceServers=ice_servers)
-
-
-class BroadcastVideoTrack(VideoStreamTrack):
-    def __init__(self, broadcaster, fps):
-        super().__init__()
-        self._broadcaster = broadcaster
-        self._fps = max(1, int(fps))
-        self._token, self._queue = broadcaster.subscribe()
-        self._time_base = fractions.Fraction(1, 90000)
-        self._pts = 0
-        self._step = int(90000 / self._fps)
-        self._latest_seq = 0
-
-    @property
-    def latest_seq(self):
-        return self._latest_seq
-
-    async def recv(self):
-        if VideoFrame is None or cv2 is None or np is None:
-            await asyncio.sleep(0.1)
-            raise RuntimeError('Video dependencies unavailable')
-
-        loop = asyncio.get_running_loop()
-        seq, frame_bytes = await loop.run_in_executor(None, self._queue.get)
-        self._latest_seq = int(seq)
-
-        img = cv2.imdecode(np.frombuffer(frame_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
-            await asyncio.sleep(1 / self._fps)
-            raise RuntimeError('Failed to decode video frame for WebRTC')
-
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        frame = VideoFrame.from_ndarray(img, format='rgb24')
-        frame.pts = self._pts
-        frame.time_base = self._time_base
-        self._pts += self._step
-        return frame
-
-    async def stop_track(self):
-        self._broadcaster.unsubscribe(self._token)
-        self.stop()
-
-
-class BroadcastAudioTrack(MediaStreamTrack):
-    kind = 'audio'
-
-    def __init__(self, broadcaster, sample_rate):
-        super().__init__()
-        self._broadcaster = broadcaster
-        self._sample_rate = int(sample_rate)
-        self._token, self._queue = broadcaster.subscribe()
-        self._time_base = fractions.Fraction(1, self._sample_rate)
-        self._sample_cursor = 0
-
-    async def recv(self):
-        if AudioFrame is None:
-            await asyncio.sleep(0.1)
-            raise RuntimeError('Audio dependencies unavailable')
-
-        loop = asyncio.get_running_loop()
-        _, chunk = await loop.run_in_executor(None, self._queue.get)
-        if not chunk:
-            await asyncio.sleep(0.01)
-            raise RuntimeError('Audio chunk unavailable')
-
-        sample_count = len(chunk) // 2
-        if sample_count <= 0:
-            await asyncio.sleep(0.01)
-            raise RuntimeError('Invalid audio chunk size')
-
-        frame = AudioFrame(format='s16', layout='mono', samples=sample_count)
-        frame.planes[0].update(chunk[:sample_count * 2])
-        frame.sample_rate = self._sample_rate
-        frame.time_base = self._time_base
-        frame.pts = self._sample_cursor
-        self._sample_cursor += sample_count
-        return frame
-
-    async def stop_track(self):
-        self._broadcaster.unsubscribe(self._token)
-        self.stop()
-
-
-class WebRTCPeerSession:
-    def __init__(self, session_id, pc, video_track, audio_track):
-        self.session_id = session_id
-        self.pc = pc
-        self.video_track = video_track
-        self.audio_track = audio_track
-        self.face_channel = None
-        self._talkback_task = None
-        self._face_task = None
-
-    async def attach_face_channel_loop(self):
-        last_face_idx = -1
-        while True:
-            await asyncio.sleep(0.05)
-            if self.face_channel is None or self.face_channel.readyState != 'open':
-                continue
-
-            seq = self.video_track.latest_seq
-            if seq > 0:
-                try:
-                    self.face_channel.send(json.dumps({'type': 'frame_meta', 'broadcast_frame_seq': seq}))
-                except Exception:
-                    pass
-
-            payload = face_recognition_service.get_push_payload_if_new(last_face_idx)
-            if payload is None:
-                continue
-
-            last_face_idx = payload['result'].get('frame_index', last_face_idx)
-            try:
-                self.face_channel.send(json.dumps({'type': 'face_data', **payload}))
-            except Exception:
-                pass
-
-    async def handle_talkback_track(self, track):
-        resampler = AudioResampler(format='s16', layout='mono', rate=SAMPLE_RATE) if AudioResampler else None
-        try:
-            while True:
-                frame = await track.recv()
-                frames = [frame]
-                if resampler is not None:
-                    frames = resampler.resample(frame)
-
-                for current in frames:
-                    if current is None:
-                        continue
-                    pcm_mono = bytes(current.planes[0])
-                    stereo_data = convert_mono_to_stereo(pcm_mono)
-                    if stereo_data:
-                        write_to_pulse_stdin(stereo_data)
-        except Exception as e:
-            print(f'⚠ WebRTC talkback track ended: {e}')
-
-    async def close(self):
-        try:
-            if self._talkback_task is not None:
-                self._talkback_task.cancel()
-        except Exception:
-            pass
-        try:
-            if self._face_task is not None:
-                self._face_task.cancel()
-        except Exception:
-            pass
-        await self.video_track.stop_track()
-        await self.audio_track.stop_track()
-        await self.pc.close()
-
-
-_webrtc_loop = None
-_webrtc_thread = None
-_webrtc_sessions = {}
-_webrtc_sessions_lock = threading.Lock()
-_webrtc_active_sessions = 0
-
-
-def _on_webrtc_session_started():
-    global _webrtc_active_sessions
-
-    should_start = False
-    with _webrtc_sessions_lock:
-        if _webrtc_active_sessions == 0:
-            should_start = True
-        _webrtc_active_sessions += 1
-        active = _webrtc_active_sessions
-
-    if should_start:
-        ensure_camera_process_running()
-        ensure_audio_capture_process_running()
-        start_pulse_process()
-
-    print(f'↗ WebRTC session started (active={active})')
-
-
-def _on_webrtc_session_ended():
-    global _webrtc_active_sessions
-
-    should_stop = False
-    with _webrtc_sessions_lock:
-        _webrtc_active_sessions = max(0, _webrtc_active_sessions - 1)
-        active = _webrtc_active_sessions
-        if active == 0:
-            should_stop = True
-
-    print(f'↘ WebRTC session ended (active={active})')
-    if should_stop:
-        stop_realtime_processes_if_idle()
-
-
-def _patch_aioice_port_range():
-    """Constrain aiortc/aioice host candidate UDP sockets to configured media range.
-
-    This mirrors surveillance-go / surveillance-node behavior where the ICE engine
-    allocates candidates directly within WEBRTC_MEDIA_PORT_MIN..MAX.
-    """
-    if RTCPeerConnection is None:
-        return
-
-    try:
-        import ipaddress as _ipaddress
-        import aioice.ice as _aioice_ice
-        import aioice.turn as _aioice_turn
-    except Exception as exc:
-        print(f'⚠ Failed to import aioice internals for port-range patch: {exc}')
-        return
-
-    connection_cls = _aioice_ice.Connection
-    if getattr(connection_cls, '_surveillance_port_range_patched', False):
-        return
-
-    async def _get_component_candidates_with_port_range(self, component: int, addresses: list[str], timeout: int = 5):
-        candidates = []
-        loop = asyncio.get_event_loop()
-
-        host_protocols = []
-        for address in addresses:
-            protocol = None
-            bind_error = None
-
-            for port in range(WEBRTC_MEDIA_PORT_MIN, WEBRTC_MEDIA_PORT_MAX + 1):
-                try:
-                    transport, protocol = await loop.create_datagram_endpoint(
-                        lambda: _aioice_ice.StunProtocol(self),
-                        local_addr=(address, port),
-                    )
-                    sock = transport.get_extra_info('socket')
-                    if sock is not None:
-                        sock.setsockopt(
-                            socket.SOL_SOCKET,
-                            socket.SO_RCVBUF,
-                            _aioice_turn.UDP_SOCKET_BUFFER_SIZE,
-                        )
-                    break
-                except OSError as exc:
-                    bind_error = exc
-                    continue
-
-            if protocol is None:
-                self._Connection__log_info(
-                    'Could not bind to %s in range %d-%d - %s',
-                    address,
-                    WEBRTC_MEDIA_PORT_MIN,
-                    WEBRTC_MEDIA_PORT_MAX,
-                    bind_error,
-                )
-                continue
-
-            host_protocols.append(protocol)
-
-            candidate_address = protocol.transport.get_extra_info('sockname')
-            protocol.local_candidate = _aioice_ice.Candidate(
-                foundation=_aioice_ice.candidate_foundation('host', 'udp', candidate_address[0]),
-                component=component,
-                transport='udp',
-                priority=_aioice_ice.candidate_priority(component, 'host'),
-                host=candidate_address[0],
-                port=candidate_address[1],
-                type='host',
-            )
-            if self._transport_policy == _aioice_ice.TransportPolicy.ALL:
-                candidates.append(protocol.local_candidate)
-
-        self._protocols += host_protocols
-
-        tasks = []
-
-        if self.stun_server:
-            for protocol in host_protocols:
-                if _ipaddress.ip_address(protocol.local_candidate.host).version == 4:
-                    tasks.append(
-                        asyncio.create_task(
-                            _aioice_ice.server_reflexive_candidate(protocol, self.stun_server)
-                        )
-                    )
-
-        if self.turn_server:
-            tasks.append(
-                asyncio.create_task(
-                    _aioice_ice.relayed_candidate(
-                        component=component,
-                        protocol_factory=lambda: _aioice_ice.StunProtocol(self),
-                        turn_server=self.turn_server,
-                        turn_username=self.turn_username,
-                        turn_password=self.turn_password,
-                        turn_ssl=self.turn_ssl,
-                        turn_transport=self.turn_transport,
-                    )
-                )
-            )
-
-        if tasks:
-            done, pending = await asyncio.wait(tasks, timeout=timeout)
-            for task in done:
-                if task.exception() is None:
-                    candidate, protocol = task.result()
-                    candidates.append(candidate)
-                    if protocol is not None:
-                        self._protocols.append(protocol)
-            for task in pending:
-                task.cancel()
-
-        return candidates
-
-    connection_cls.get_component_candidates = _get_component_candidates_with_port_range
-    connection_cls._surveillance_port_range_patched = True
-    print(
-        f'✓ WebRTC ICE UDP allocation constrained to '
-        f'[{WEBRTC_MEDIA_PORT_MIN}, {WEBRTC_MEDIA_PORT_MAX}]'
-    )
-
-
-def _start_webrtc_loop():
-    global _webrtc_loop, _webrtc_thread
-
-    if RTCPeerConnection is None:
-        return
-
-    if _webrtc_loop is not None:
-        return
-
-    def _runner():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        global _webrtc_loop
-        _webrtc_loop = loop
-        loop.run_forever()
-
-    _webrtc_thread = threading.Thread(target=_runner, daemon=True, name='webrtc-loop')
-    _webrtc_thread.start()
-
-    while _webrtc_loop is None:
-        time.sleep(0.01)
-
-
-def _submit_webrtc(coro):
-    if _webrtc_loop is None:
-        if inspect.iscoroutine(coro):
-            coro.close()
-        raise RuntimeError('WebRTC loop is not running')
-    future = asyncio.run_coroutine_threadsafe(coro, _webrtc_loop)
-    return future.result(timeout=20)
-
-
-def _candidate_ports_in_range(sdp):
-    candidate_pattern = re.compile(
-        r'^a=candidate:[^ ]+ [0-9]+ [A-Za-z0-9]+ [0-9]+ [^ ]+ ([0-9]+) typ ([a-zA-Z0-9]+)',
-        re.MULTILINE,
-    )
-    for match in candidate_pattern.finditer(sdp or ''):
-        port = int(match.group(1))
-        candidate_type = match.group(2).lower()
-        # Enforce local media port range on host candidates only.
-        # srflx/relay candidates may advertise NAT/TURN mapped ports outside
-        # the local bind range, which is expected and should not be rejected.
-        if candidate_type != 'host':
-            continue
-        if not (WEBRTC_MEDIA_PORT_MIN <= port <= WEBRTC_MEDIA_PORT_MAX):
-            return False, port
-    return True, None
-
-
-async def _create_webrtc_answer(offer_sdp, offer_type):
-    if RTCPeerConnection is None:
-        raise RuntimeError('WebRTC backend dependencies are not available (install aiortc/av)')
-
-    if not ensure_camera_process_running():
-        raise RuntimeError('Camera process is unavailable')
-    if not ensure_audio_capture_process_running():
-        raise RuntimeError('Audio process is unavailable')
-
-    session_id = f'{int(time.time() * 1000)}-{os.getpid()}-{id(object())}'
-    pc = RTCPeerConnection(_build_webrtc_configuration())
-    video_track = BroadcastVideoTrack(video_broadcaster, camera_settings['fps'])
-    audio_track = BroadcastAudioTrack(audio_broadcaster, SAMPLE_RATE)
-    session = WebRTCPeerSession(session_id, pc, video_track, audio_track)
-
-    pc.addTrack(video_track)
-    pc.addTrack(audio_track)
-
-    @pc.on('datachannel')
-    def on_datachannel(channel):
-        if channel.label == 'face-data':
-            session.face_channel = channel
-
-    @pc.on('track')
-    def on_track(track):
-        if track.kind == 'audio':
-            session._talkback_task = asyncio.create_task(session.handle_talkback_track(track))
-
-    @pc.on('connectionstatechange')
-    def on_connectionstatechange():
-        if pc.connectionState in ('failed', 'closed'):
-            async def _cleanup():
-                removed = False
-                with _webrtc_sessions_lock:
-                    removed = _webrtc_sessions.pop(session_id, None) is not None
-                if removed:
-                    _on_webrtc_session_ended()
-                await session.close()
-
-            asyncio.create_task(_cleanup())
-
-    with _webrtc_sessions_lock:
-        _webrtc_sessions[session_id] = session
-    _on_webrtc_session_started()
-
-    session._face_task = asyncio.create_task(session.attach_face_channel_loop())
-
-    offer = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
-    await pc.setRemoteDescription(offer)
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-
-    timeout_at = time.time() + 6.0
-    while pc.iceGatheringState != 'complete' and time.time() < timeout_at:
-        await asyncio.sleep(0.05)
-
-    local_desc = pc.localDescription
-    if local_desc is None:
-        raise RuntimeError('WebRTC local description is unavailable')
-
-    in_range, bad_port = _candidate_ports_in_range(local_desc.sdp)
-    if not in_range:
-        await session.close()
-        removed = False
-        with _webrtc_sessions_lock:
-            removed = _webrtc_sessions.pop(session_id, None) is not None
-        if removed:
-            _on_webrtc_session_ended()
-        raise RuntimeError(
-            f'ICE candidate port {bad_port} is outside configured media range '
-            f'[{WEBRTC_MEDIA_PORT_MIN}, {WEBRTC_MEDIA_PORT_MAX}]'
-        )
-
-    return {'sdp': local_desc.sdp, 'type': local_desc.type}
-
-
 # Start processes
 camera_proc = start_camera(
     camera_settings['width'],
@@ -2230,11 +1774,111 @@ audio_broadcaster = FrameBroadcaster('audio', _audio_chunks_gen)
 video_broadcaster.set_proc(camera_proc)
 audio_broadcaster.set_proc(audio_proc)
 
-_patch_aioice_port_range()
-_start_webrtc_loop()
-
-# Start in idle mode. Realtime processes are started on first WebRTC session.
+# Start in idle mode. Realtime processes are started on first subscriber.
 stop_realtime_processes_if_idle()
+
+WS_METRICS_LOG_EVERY_SECONDS = 60
+ws_metrics_lock = threading.Lock()
+ws_metrics = {
+    'started_at': time.time(),
+    'video': {
+        'active': 0,
+        'total_connected': 0,
+        'total_disconnected': 0,
+        'total_errors': 0,
+        'last_connected_at': None,
+        'last_disconnected_at': None,
+        'last_error_at': None,
+        'last_error': None,
+    },
+    'audio': {
+        'active': 0,
+        'total_connected': 0,
+        'total_disconnected': 0,
+        'total_errors': 0,
+        'last_connected_at': None,
+        'last_disconnected_at': None,
+        'last_error_at': None,
+        'last_error': None,
+    },
+    'talk': {
+        'active': 0,
+        'total_connected': 0,
+        'total_disconnected': 0,
+        'total_errors': 0,
+        'last_connected_at': None,
+        'last_disconnected_at': None,
+        'last_error_at': None,
+        'last_error': None,
+    },
+}
+
+
+def _ws_mark_connected(endpoint):
+    now = time.time()
+    with ws_metrics_lock:
+        endpoint_stats = ws_metrics[endpoint]
+        endpoint_stats['active'] += 1
+        endpoint_stats['total_connected'] += 1
+        endpoint_stats['last_connected_at'] = now
+        return endpoint_stats['active']
+
+
+def _ws_mark_disconnected(endpoint):
+    now = time.time()
+    with ws_metrics_lock:
+        endpoint_stats = ws_metrics[endpoint]
+        endpoint_stats['active'] = max(0, endpoint_stats['active'] - 1)
+        endpoint_stats['total_disconnected'] += 1
+        endpoint_stats['last_disconnected_at'] = now
+        return endpoint_stats['active']
+
+
+def _ws_mark_error(endpoint, error):
+    now = time.time()
+    with ws_metrics_lock:
+        endpoint_stats = ws_metrics[endpoint]
+        endpoint_stats['total_errors'] += 1
+        endpoint_stats['last_error_at'] = now
+        endpoint_stats['last_error'] = str(error)[:200]
+
+
+def _ws_metrics_snapshot():
+    with ws_metrics_lock:
+        snapshot = {'started_at': ws_metrics['started_at']}
+        for endpoint in ('video', 'audio', 'talk'):
+            snapshot[endpoint] = dict(ws_metrics[endpoint])
+
+    snapshot['total_active'] = (
+        snapshot['video']['active']
+        + snapshot['audio']['active']
+        + snapshot['talk']['active']
+    )
+    return snapshot
+
+
+def _ws_metrics_reporter():
+    while True:
+        time.sleep(WS_METRICS_LOG_EVERY_SECONDS)
+        snapshot = _ws_metrics_snapshot()
+        print(
+            '📊 WS metrics '
+            f"active(v/a/t)={snapshot['video']['active']}/{snapshot['audio']['active']}/{snapshot['talk']['active']} "
+            f"connected(v/a/t)={snapshot['video']['total_connected']}/{snapshot['audio']['total_connected']}/{snapshot['talk']['total_connected']} "
+            f"disconnected(v/a/t)={snapshot['video']['total_disconnected']}/{snapshot['audio']['total_disconnected']}/{snapshot['talk']['total_disconnected']} "
+            f"errors(v/a/t)={snapshot['video']['total_errors']}/{snapshot['audio']['total_errors']}/{snapshot['talk']['total_errors']}"
+        )
+
+
+threading.Thread(target=_ws_metrics_reporter, daemon=True, name='ws-metrics-reporter').start()
+
+
+def _safe_ws_close(ws, name):
+    """Close socket quietly during cleanup; disconnect is often already in progress."""
+    try:
+        ws.close()
+    except Exception as e:
+        print(f'{name} close ignored: {e}')
 
 
 @app.after_request
@@ -2264,6 +1908,86 @@ def index():
         camera_source_type=get_camera_source_type(selected_camera_device),
     )
 
+@sock.route('/video_feed')
+def video_feed_socket(ws):
+    """Stream JPEG frames over WebSocket from the shared camera broadcaster."""
+    on_stream_subscriber_connected('video')
+
+    if not ensure_camera_process_running():
+        print('📹 Video socket: camera not available')
+        _safe_ws_close(ws, '📹 Video socket')
+        on_stream_subscriber_disconnected('video')
+        return
+
+    active_count = _ws_mark_connected('video')
+    print(f'📹 Video socket connected (active={active_count})')
+    token, q = video_broadcaster.subscribe()
+    last_sent_face_idx = -1
+    try:
+        while True:
+            try:
+                seq, frame = q.get(timeout=5.0)
+            except queue.Empty:
+                if camera_proc is None or camera_proc.poll() is not None:
+                    if not ensure_camera_process_running():
+                        print('📹 Video socket: camera unavailable after restart attempt')
+                        break
+                continue
+            ws.send(json.dumps({'type': 'frame_meta', 'broadcast_frame_seq': seq}))
+            ws.send(frame)
+            payload = face_recognition_service.get_push_payload_if_new(last_sent_face_idx)
+            if payload is not None:
+                last_sent_face_idx = payload['result'].get('frame_index', last_sent_face_idx)
+                ws.send(json.dumps({'type': 'face_data', **payload}))
+    except Exception as e:
+        _ws_mark_error('video', e)
+        print(f'📹 Video socket closed: {e}')
+    finally:
+        video_broadcaster.unsubscribe(token)
+        _safe_ws_close(ws, '📹 Video socket')
+        active_count = _ws_mark_disconnected('video')
+        print(f'📹 Video socket disconnected (active={active_count})')
+        on_stream_subscriber_disconnected('video')
+
+
+@sock.route('/audio_feed')
+def audio_feed_socket(ws):
+    """Stream mono microphone PCM over WebSocket from the shared audio broadcaster."""
+    on_stream_subscriber_connected('audio')
+
+    if not ensure_audio_capture_process_running():
+        print('🎤 Audio socket: audio process not available after restart attempt')
+        _safe_ws_close(ws, '🎤 Audio socket')
+        on_stream_subscriber_disconnected('audio')
+        return
+
+    active_count = _ws_mark_connected('audio')
+    print(f'🎤 Audio socket connected (active={active_count})')
+    token, q = audio_broadcaster.subscribe()
+    chunk_count = 0
+    try:
+        while True:
+            try:
+                _, chunk = q.get(timeout=5.0)
+            except queue.Empty:
+                if audio_proc is None or audio_proc.poll() is not None:
+                    if not ensure_audio_capture_process_running():
+                        print('🎤 Audio socket: audio unavailable after restart attempt')
+                        break
+                continue
+            chunk_count += 1
+            if chunk_count % 50 == 0:
+                print(f'🎤 Audio socket: sent chunk {chunk_count} ({len(chunk)} bytes)')
+            ws.send(chunk)
+    except Exception as e:
+        _ws_mark_error('audio', e)
+        print(f'🎤 Audio socket closed: {e}')
+    finally:
+        audio_broadcaster.unsubscribe(token)
+        _safe_ws_close(ws, '🎤 Audio socket')
+        active_count = _ws_mark_disconnected('audio')
+        print(f'🎤 Audio socket disconnected (active={active_count})')
+        on_stream_subscriber_disconnected('audio')
 
 def convert_mono_to_stereo(mono_data):
     """Convert mono audio to stereo and apply configurable playback gain."""
@@ -2288,6 +2012,48 @@ def convert_mono_to_stereo(mono_data):
         offset += 4
 
     return bytes(stereo_buffer)
+
+
+@sock.route('/ws/talk')
+def talk_audio_socket(ws):
+    """Receive mono PCM from the browser over WebSocket and play it immediately."""
+    on_stream_subscriber_connected('talk')
+
+    active_count = _ws_mark_connected('talk')
+    print(f'🎙 WebSocket talkback connected (active={active_count})')
+    message_count = 0
+    received_bytes = 0
+    try:
+        while True:
+            message = ws.receive()
+            if message is None:
+                print('🎙 Talkback socket closed by client')
+                break
+
+            if isinstance(message, str):
+                print(f'🎙 Talkback text frame ignored: {message[:80]}')
+                continue
+
+            if not message:
+                continue
+
+            message_count += 1
+            received_bytes += len(message)
+            if message_count <= 3 or message_count % 25 == 0:
+                print(f'🎙 Talkback received chunk {message_count} ({len(message)} bytes, total {received_bytes} bytes)')
+
+            stereo_data = convert_mono_to_stereo(message)
+            if stereo_data and not write_to_pulse_stdin(stereo_data):
+                print('⚠ WebSocket talkback write failed')
+                break
+    except Exception as e:
+        _ws_mark_error('talk', e)
+        print(f'⚠ WebSocket talkback closed: {e}')
+    finally:
+        _safe_ws_close(ws, '🎙 Talkback socket')
+        active_count = _ws_mark_disconnected('talk')
+        print(f'🎙 WebSocket talkback disconnected (active={active_count})')
+        on_stream_subscriber_disconnected('talk')
 
 
 @app.route('/speaker_volume', methods=['GET'])
@@ -2458,6 +2224,7 @@ def set_camera_settings():
 def status():
     speaker_volume, speaker_control = _get_speaker_volume_percent()
     selected_camera_device = active_camera_device or camera_device_preference or CAMERA_DEVICE
+    ws_snapshot = _ws_metrics_snapshot()
     return jsonify({
         'camera': camera_proc is not None and camera_proc.poll() is None,
         'audio': audio_proc is not None and audio_proc.poll() is None,
@@ -2471,35 +2238,9 @@ def status():
         'audio_player_nice': AUDIO_PLAYER_NICE,
         'face_recognition_enabled': FACE_RECOGNITION_ENABLED,
         'speaker_volume': speaker_volume,
-        'speaker_control': speaker_control
+        'speaker_control': speaker_control,
+        'ws_connections': ws_snapshot
     })
-
-
-@app.route('/webrtc/connect', methods=['POST'])
-def webrtc_connect():
-    payload = request.get_json(silent=True) or {}
-    sdp = payload.get('sdp')
-    sdp_type = payload.get('type')
-
-    if not sdp or not sdp_type:
-        return jsonify({'status': 'error', 'message': 'Missing sdp or type'}), 400
-
-    if sdp_type not in ('offer',):
-        return jsonify({'status': 'error', 'message': 'SDP type must be offer'}), 400
-
-    if RTCPeerConnection is None:
-        return jsonify({'status': 'error', 'message': 'WebRTC backend dependencies are not installed'}), 500
-
-    if _webrtc_loop is None:
-        return jsonify({'status': 'error', 'message': 'WebRTC loop is not running'}), 500
-
-    try:
-        answer_coro = _create_webrtc_answer(str(sdp), str(sdp_type))
-        response = _submit_webrtc(answer_coro)
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-    return jsonify(response)
 
 @app.route('/face_status', methods=['GET'])
 def face_status():
@@ -2676,15 +2417,6 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
-        if _webrtc_loop is not None:
-            with _webrtc_sessions_lock:
-                sessions = list(_webrtc_sessions.values())
-                _webrtc_sessions.clear()
-            for session in sessions:
-                try:
-                    _submit_webrtc(session.close())
-                except Exception:
-                    pass
         face_recognition_service.stop()
         stop_realtime_processes_if_idle()
         _teardown_pulseaudio_echo_cancel()
