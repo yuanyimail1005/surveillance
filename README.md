@@ -1,6 +1,8 @@
 # surveillance
 A surveillance system with camera, speaker, microphone, and AI face recognition on Raspberry Pi. Supports real-time face detection and identification, live video/audio streaming, two-way talkback, snapshot capture, and video recording — accessible from a browser or the companion Android app.
 
+Browser live media transport uses WebRTC (RTP tracks for video/audio/talkback + a `face-data` DataChannel for metadata), while HTTPS control/signaling remains on port `5000`.
+
 ## Docker
 
 The recommended way to run the app is with Docker Compose. The image is built on
@@ -48,6 +50,9 @@ Key variables in `.env`:
 | Variable | Default | Description |
 |---|---|---|
 | `SERVER_PORT` | `5000` | HTTPS port the server listens on |
+| `WEBRTC_ICE_SERVERS` | `stun:stun.l.google.com:19302` | Comma-separated ICE server URLs used by browser WebRTC sessions |
+| `WEBRTC_TURN_USERNAME` / `WEBRTC_TURN_PASSWORD` | `(empty)` | TURN credentials used when `turn:` / `turns:` ICE URLs are configured |
+| `WEBRTC_MEDIA_PORT_MIN` / `WEBRTC_MEDIA_PORT_MAX` | `10000` / `15000` | Allowed UDP media candidate range for WebRTC sessions |
 | `CAMERA_DEVICE` | `/dev/video0` | Default V4L2 device (app also auto-detects) |
 | `CAMERA_WIDTH` / `CAMERA_HEIGHT` | `1920` / `1080` | Default capture resolution |
 | `CAMERA_FPS` | `25` | Default capture frame rate |
@@ -105,6 +110,7 @@ sudo docker compose logs -f surveillance
 ### Notes
 
 - The container uses `network_mode: host`, so the app binds directly to port `5000` on the host — ensure no other process is using that port before starting.
+- WebRTC sessions always enforce the configured local UDP media candidate range (`WEBRTC_MEDIA_PORT_MIN` to `WEBRTC_MEDIA_PORT_MAX`). Keep this UDP range reachable for browser clients.
 - CSI camera (`rpicam://0`) is auto-detected when `rpicam-vid` is available inside the container. USB/V4L2 cameras are also auto-detected via `v4l2-ctl`.
 - Only one Gunicorn worker is used to prevent duplicate camera/audio pipelines being opened at module import time.
 
