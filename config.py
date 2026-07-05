@@ -58,6 +58,32 @@ _user_home = os.path.expanduser('~')
 SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', os.path.join(_user_home, 'certs', 'cert.pem'))
 SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', os.path.join(_user_home, 'certs', 'key.pem'))
 
+WEBRTC_ICE_SERVERS = [
+    value.strip()
+    for value in os.environ.get('WEBRTC_ICE_SERVERS', 'stun:stun.l.google.com:19302').split(',')
+    if value.strip()
+]
+WEBRTC_TURN_USERNAME = os.environ.get('WEBRTC_TURN_USERNAME', '')
+WEBRTC_TURN_PASSWORD = os.environ.get('WEBRTC_TURN_PASSWORD', '')
+
+try:
+    _webrtc_media_port_min = int(os.environ.get('WEBRTC_MEDIA_PORT_MIN', '10000'))
+except ValueError:
+    _webrtc_media_port_min = 10000
+
+try:
+    _webrtc_media_port_max = int(os.environ.get('WEBRTC_MEDIA_PORT_MAX', '15000'))
+except ValueError:
+    _webrtc_media_port_max = 15000
+
+_webrtc_media_port_min = max(1, min(65535, _webrtc_media_port_min))
+_webrtc_media_port_max = max(1, min(65535, _webrtc_media_port_max))
+if _webrtc_media_port_min > _webrtc_media_port_max:
+    _webrtc_media_port_min, _webrtc_media_port_max = _webrtc_media_port_max, _webrtc_media_port_min
+
+WEBRTC_MEDIA_PORT_MIN = _webrtc_media_port_min
+WEBRTC_MEDIA_PORT_MAX = _webrtc_media_port_max
+
 FACE_RECOGNITION_ENABLED = os.environ.get('FACE_RECOGNITION_ENABLED', 'false').lower() == 'true'
 FACE_RECOGNITION_KNOWN_FACES_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get('FACE_RECOGNITION_KNOWN_FACES_DIR', os.path.join(_user_home, 'known_faces'))

@@ -64,5 +64,6 @@ RUN set -eux; \
 COPY . .
 
 EXPOSE 5000
+EXPOSE 10000-15000/udp
 
 CMD ["sh", "-c", "exec gunicorn --bind ${SERVER_HOST:-0.0.0.0}:${SERVER_PORT:-5000} --workers 1 --threads 100 --timeout 0 --access-logfile - --error-logfile - --certfile ${SSL_CERT_PATH:-/certs/cert.pem} --keyfile ${SSL_KEY_PATH:-/certs/key.pem} app:app"]
